@@ -17,6 +17,16 @@
 #   ./client.sh list
 #   ./client.sh exec abc123 "ls -la"
 #   ./client.sh env-set abc123 MY_VAR=value
+#
+# Kubernetes-Style Cluster Control Plane (Optional):
+#   If you want a Kubernetes-like workflow (clusters, nodes, workloads/replicas, placements, agent heartbeats),
+#   use Quilt's Kubernetes-style CLI ("QCLI") a.k.a. `quiltc`:
+#     Repo: https://github.com/ariacomputecompany/quiltc
+#   Mapping (high level):
+#     - Workload (replicas) ~ Deployment/ReplicaSet
+#     - Placement (replica_index -> node) ~ Pod scheduled to a Node
+#     - Agent register/heartbeat/report ~ Kubelet node lifecycle + status reporting
+#   See `K8S.md` and `RESULTS.md` in that repo for verified behavior and endpoint coverage.
 # =============================================================================
 
 set -euo pipefail
