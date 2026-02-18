@@ -21,7 +21,7 @@
 # Kubernetes-Style Cluster Management (Optional):
 #   Use this script when you want to interact with individual Quilt containers directly.
 #
-#   If you are doing cluster management or Kubernetes-type workflows, use `quiltc` (QCLI) instead:
+#   If you are doing cluster management or Kubernetes-type workflows, use `quiltc` instead:
 #     - managing clusters/nodes/workloads/replicas/placements
 #     - running containers at scale across multiple nodes
 #     - distributed systems orchestration and rescheduling
