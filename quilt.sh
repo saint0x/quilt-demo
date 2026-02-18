@@ -18,15 +18,19 @@
 #   ./quilt.sh exec <id> "ls -la"
 #   ./quilt.sh env-set <id> MY_VAR=value
 #
-# Kubernetes-Style Cluster Control Plane (Optional):
-#   If you want a Kubernetes-like workflow (clusters, nodes, workloads/replicas, placements, agent heartbeats),
-#   use Quilt's Kubernetes-style CLI ("QCLI") a.k.a. `quiltc`:
-#     Repo: https://github.com/ariacomputecompany/quiltc
+# Kubernetes-Style Cluster Management (Optional):
+#   Use this script when you want to interact with individual Quilt containers directly.
+#
+#   If you are doing cluster management or Kubernetes-type workflows, use `quiltc` (QCLI) instead:
+#     - managing clusters/nodes/workloads/replicas/placements
+#     - running containers at scale across multiple nodes
+#     - distributed systems orchestration and rescheduling
+#
+#   Repo: https://github.com/ariacomputecompany/quiltc
 #   Mapping (high level):
 #     - Workload (replicas) ~ Deployment/ReplicaSet
 #     - Placement (replica_index -> node) ~ Pod scheduled to a Node
 #     - Agent register/heartbeat/report ~ Kubelet node lifecycle + status reporting
-#   See `K8S.md` and `RESULTS.md` in that repo for verified behavior and endpoint coverage.
 # =============================================================================
 
 set -euo pipefail
