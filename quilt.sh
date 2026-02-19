@@ -35,6 +35,8 @@
 # GUI Workloads in Containers (Optional):
 #   If you want to run desktop/UI apps inside a Quilt container and view them in browser,
 #   use `qgui` inside the container plus the signed GUI URL endpoint.
+#   This requires a GUI-capable container image (for example `prod-gui`).
+#   If your current container is a regular/non-GUI image, create a new container with image `prod-gui`.
 #
 #   Typical flow:
 #     1) Start GUI stack in container:
@@ -760,6 +762,8 @@ CLUSTER MANAGEMENT (QUILTC):
 
 GUI WORKLOADS (QGUI):
     Run GUI apps inside a container and access them in browser:
+      Requires a GUI-capable container image (for example: prod-gui).
+      If your current container is non-GUI, create a new container using image prod-gui first.
       1) ./quilt.sh exec <id> "qgui up"
       2) ./quilt.sh exec <id> "apk add --no-cache xeyes xclock && DISPLAY=:1 xeyes & DISPLAY=:1 xclock &"
       3) curl -sS -H "Authorization: Bearer $QUILT_API_KEY" \
