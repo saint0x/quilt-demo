@@ -114,7 +114,7 @@ b64_file() {
     if base64 --help 2>/dev/null | grep -q -- '-w'; then
         base64 -w 0 "$f"
     else
-        base64 "$f" | tr -d '\n'
+        base64 < "$f" | tr -d '\n'
     fi
 }
 
@@ -422,9 +422,9 @@ cmd_create() {
 
     local payload
     if [[ -n "$cmd" ]]; then
-        payload="{\"name\":\"$(json_escape "$name")\",\"command\":[\"/bin/sh\",\"-c\",\"$(json_escape "$cmd")\"],\"memory_limit_mb\":512,\"cpu_limit_percent\":50.0}"
+        payload="{\"name\":\"$(json_escape "$name")\",\"command\":[\"/bin/sh\",\"-c\",\"$(json_escape "$cmd")\"]}"
     else
-        payload="{\"name\":\"$(json_escape "$name")\",\"memory_limit_mb\":512,\"cpu_limit_percent\":50.0}"
+        payload="{\"name\":\"$(json_escape "$name")\"}"
     fi
 
     api_request POST "/api/containers" "$payload" | pretty_json
