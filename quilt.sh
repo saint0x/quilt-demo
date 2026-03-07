@@ -1214,14 +1214,182 @@ cmd_icc_dlq_replay() {
 # =============================================================================
 # Terminal Sessions
 # =============================================================================
+get_auth_value_for_ws_query() {
+    case "$QUILT_AUTH_MODE" in
+        token)
+            [[ -n "$QUILT_TOKEN" ]] || die "QUILT_AUTH_MODE=token but QUILT_TOKEN is empty"
+            printf '%s' "$QUILT_TOKEN"
+            ;;
+        api-key)
+            [[ -n "$QUILT_API_KEY" ]] || die "QUILT_AUTH_MODE=api-key but QUILT_API_KEY is empty"
+            printf '%s' "$QUILT_API_KEY"
+            ;;
+        auto)
+            if [[ -n "$QUILT_API_KEY" ]]; then
+                printf '%s' "$QUILT_API_KEY"
+            elif [[ -n "$QUILT_TOKEN" ]]; then
+                printf '%s' "$QUILT_TOKEN"
+            else
+                die "No authentication configured. Set QUILT_API_KEY or QUILT_TOKEN."
+            fi
+            ;;
+        *)
+            die "Invalid QUILT_AUTH_MODE='$QUILT_AUTH_MODE' (expected: auto|token|api-key)"
+            ;;
+    esac
+}
+
+ws_url_with_token() {
+    local base_url="$1"
+    local token="$2"
+    local sep='?'
+
+    [[ -n "$base_url" ]] || die "ws_url_with_token requires base URL"
+    [[ -n "$token" ]] || { printf '%s' "$base_url"; return 0; }
+
+    if [[ "$base_url" == *"token="* ]]; then
+        printf '%s' "$base_url"
+        return 0
+    fi
+
+    [[ "$base_url" == *\?* ]] && sep='&'
+    printf '%s%s%s' "$base_url" "$sep" "token=$(url_encode "$token")"
+}
+
+attach_terminal_node() {
+    local ws_url="$1"
+    local cols="${2:-120}"
+    local rows="${3:-30}"
+    [[ -n "$ws_url" ]] || die "attach_terminal_node requires websocket URL"
+    have_cmd node || die "Interactive terminal attach requires node (for websocket streaming)."
+
+    node - "$ws_url" "$cols" "$rows" <<'NODEEOF'
+const url = process.argv[2];
+const initCols = Number(process.argv[3] || 120);
+const initRows = Number(process.argv[4] || 30);
+const WebSocketCtor = globalThis.WebSocket;
+
+if (!WebSocketCtor) {
+  console.error("[ERROR] Node runtime does not expose WebSocket. Use --create-only and attach with another client.");
+  process.exit(2);
+}
+
+let ttyConfigured = false;
+let remoteExitCode = 0;
+let closed = false;
+
+function restoreTty() {
+  if (ttyConfigured && process.stdin.isTTY) {
+    try { process.stdin.setRawMode(false); } catch (_) {}
+  }
+}
+
+function sendJson(ws, obj) {
+  if (ws.readyState !== WebSocketCtor.OPEN) return;
+  ws.send(JSON.stringify(obj));
+}
+
+const ws = new WebSocketCtor(url);
+
+ws.onopen = () => {
+  const cols = process.stdout.columns || initCols;
+  const rows = process.stdout.rows || initRows;
+  sendJson(ws, { type: "resize", cols, rows });
+
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    ttyConfigured = true;
+  }
+
+  process.stdin.resume();
+  process.stdin.on("data", (chunk) => {
+    if (ws.readyState !== WebSocketCtor.OPEN) return;
+    sendJson(ws, { type: "input", data: chunk.toString("utf8") });
+  });
+};
+
+ws.onmessage = (evt) => {
+  const raw = typeof evt.data === "string" ? evt.data : Buffer.from(evt.data).toString("utf8");
+  let msg;
+  try {
+    msg = JSON.parse(raw);
+  } catch (_) {
+    process.stdout.write(raw);
+    return;
+  }
+
+  switch (msg.type) {
+    case "ready":
+      break;
+    case "output":
+      if (typeof msg.data === "string") process.stdout.write(msg.data);
+      break;
+    case "pong":
+      break;
+    case "exit":
+      remoteExitCode = Number(msg.code || 0);
+      ws.close();
+      break;
+    case "error":
+      process.stderr.write(`[ERROR] Terminal: ${msg.code || "UNKNOWN"} ${msg.message || ""}\n`);
+      ws.close();
+      break;
+    default:
+      break;
+  }
+};
+
+ws.onerror = () => {
+  process.stderr.write("[ERROR] WebSocket attach failed.\n");
+};
+
+ws.onclose = () => {
+  if (closed) return;
+  closed = true;
+  restoreTty();
+  process.exit(Number.isFinite(remoteExitCode) ? remoteExitCode : 0);
+};
+
+process.on("SIGWINCH", () => {
+  const cols = process.stdout.columns || initCols;
+  const rows = process.stdout.rows || initRows;
+  sendJson(ws, { type: "resize", cols, rows });
+});
+
+process.on("SIGINT", () => {
+  sendJson(ws, { type: "signal", signal: "SIGINT" });
+});
+
+process.on("exit", restoreTty);
+NODEEOF
+}
+
 cmd_shell() {
     local container_id="${1:-}"
-    [[ -n "$container_id" ]] || die "Usage: $0 shell <container_id>"
+    shift || true
+    [[ -n "$container_id" ]] || die "Usage: $0 shell <container_id> [--create-only] [--cols=<n>] [--rows=<n>] [--shell=<path>]"
+
+    local create_only=false
+    local cols=120
+    local rows=30
+    local shell_path="/bin/bash"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --create-only|--no-attach) create_only=true; shift ;;
+            --cols=*) cols="${1#*=}"; shift ;;
+            --rows=*) rows="${1#*=}"; shift ;;
+            --shell=*) shell_path="${1#*=}"; shift ;;
+            *)
+                die "Usage: $0 shell <container_id> [--create-only] [--cols=<n>] [--rows=<n>] [--shell=<path>]"
+                ;;
+        esac
+    done
 
     log_info "Creating terminal session for container $container_id..."
 
     local payload
-    payload="{\"target\":\"container\",\"container_id\":\"$(json_escape "$container_id")\",\"cols\":120,\"rows\":30,\"shell\":\"/bin/bash\"}"
+    payload="{\"target\":\"container\",\"container_id\":\"$(json_escape "$container_id")\",\"cols\":$cols,\"rows\":$rows,\"shell\":\"$(json_escape "$shell_path")\"}"
 
     local session
     session=$(api_request POST "/api/terminal/sessions" "$payload")
@@ -1243,7 +1411,28 @@ cmd_shell() {
         log_warn "No websocket_url/attach_url in response (check server version / auth method)."
     fi
 
-    echo "$session" | pretty_json
+    if [[ "$create_only" == true ]]; then
+        echo "$session" | pretty_json
+        return 0
+    fi
+
+    local ws_base auth_value ws_attach_url
+    ws_base="${websocket_url:-$attach_url}"
+    [[ -n "$ws_base" ]] || die "Terminal session created but no attach URL was returned."
+
+    auth_value=$(get_auth_value_for_ws_query)
+    ws_attach_url=$(ws_url_with_token "$ws_base" "$auth_value")
+
+    log_info "Attaching to terminal session $session_id..."
+    attach_terminal_node "$ws_attach_url" "$cols" "$rows"
+    return $?
+}
+
+# Backward compatibility alias for scripts that expect JSON-only shell create behavior
+cmd_shell_create() {
+    local container_id="${1:-}"
+    [[ -n "$container_id" ]] || die "Usage: $0 shell-create <container_id>"
+    cmd_shell "$container_id" --create-only
 }
 
 # =============================================================================
@@ -1314,7 +1503,13 @@ CONTAINERS:
     jobs <id>                    List exec jobs (detach mode)
     job-get <id> <job_id> [bool] Get exec job details (include_output default true)
 
-    shell <id>                   Create terminal session (returns session JSON)
+    shell <id> [opts]            Open interactive terminal (create + attach)
+                                 opts:
+                                   --create-only    Create session and print JSON only
+                                   --cols=<n>       Initial terminal columns (default 120)
+                                   --rows=<n>       Initial terminal rows (default 30)
+                                   --shell=<path>   Shell path in container (default /bin/bash)
+    shell-create <id>            Create terminal session (JSON only; legacy behavior)
 
 OPERATIONS:
     op-status <operation_id>     Get operation status
@@ -1462,6 +1657,7 @@ main() {
 
         # Terminal
         shell)          cmd_shell "$@" ;;
+        shell-create|shell-json) cmd_shell_create "$@" ;;
 
         # Help
         help|--help|-h) cmd_help ;;
