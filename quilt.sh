@@ -9,8 +9,9 @@
 #
 # Environment Variables:
 #   QUILT_API_URL           API base URL (default: https://backend.quilt.sh)
-#   QUILT_TOKEN             JWT auth token (required for most commands)
-#   QUILT_API_KEY           API key (alternative to token)
+#   QUILT_TOKEN             JWT auth token (optional)
+#   QUILT_API_KEY           API key (optional)
+#   QUILT_AUTH_MODE         auto|token|api-key (default: auto)
 #
 # Examples:
 #   export QUILT_API_KEY="quilt_sk_..."
@@ -44,7 +45,7 @@
 #     2) Launch a GUI app on the X display (example for Alpine):
 #          ./quilt.sh exec <container_id> "apk add --no-cache xeyes xclock && DISPLAY=:1 xeyes & DISPLAY=:1 xclock &"
 #     3) Get signed GUI URL:
-#          curl -sS -H "Authorization: Bearer $QUILT_API_KEY" \
+#          curl -sS -H "X-Api-Key: $QUILT_API_KEY" \
 #            "$QUILT_API_URL/api/containers/<container_id>/gui-url"
 #        Open returned `gui_url` in browser immediately.
 #
@@ -61,6 +62,7 @@ set -euo pipefail
 QUILT_API_URL="${QUILT_API_URL:-https://backend.quilt.sh}"
 QUILT_TOKEN="${QUILT_TOKEN:-}"
 QUILT_API_KEY="${QUILT_API_KEY:-}"
+QUILT_AUTH_MODE="${QUILT_AUTH_MODE:-auto}"
 
 # Colors
 RED='\033[0;31m'
@@ -100,6 +102,21 @@ trim_leading_slash() {
     printf '%s' "$p"
 }
 
+url_encode() {
+    local s="$1"
+    local out=""
+    local i c hex
+    for ((i=0; i<${#s}; i++)); do
+        c="${s:$i:1}"
+        case "$c" in
+            [a-zA-Z0-9.~_-]) out+="$c" ;;
+            '/') out+="%2F" ;;
+            *) printf -v hex '%%%02X' "'$c"; out+="$hex" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 b64_string() {
     local s="$1"
     if base64 --help 2>/dev/null | grep -q -- '-w'; then
@@ -119,13 +136,31 @@ b64_file() {
 }
 
 get_auth_header() {
-    if [[ -n "$QUILT_TOKEN" ]]; then
-        echo "Authorization: Bearer $QUILT_TOKEN"
-    elif [[ -n "$QUILT_API_KEY" ]]; then
-        echo "X-Api-Key: $QUILT_API_KEY"
-    else
-        die "No authentication configured. Set QUILT_TOKEN or QUILT_API_KEY."
-    fi
+    case "$QUILT_AUTH_MODE" in
+        token)
+            [[ -n "$QUILT_TOKEN" ]] || die "QUILT_AUTH_MODE=token but QUILT_TOKEN is empty"
+            echo "Authorization: Bearer $QUILT_TOKEN"
+            ;;
+        api-key)
+            [[ -n "$QUILT_API_KEY" ]] || die "QUILT_AUTH_MODE=api-key but QUILT_API_KEY is empty"
+            echo "X-Api-Key: $QUILT_API_KEY"
+            ;;
+        auto)
+            if [[ -n "$QUILT_API_KEY" && -n "$QUILT_TOKEN" ]]; then
+                log_warn "Both QUILT_API_KEY and QUILT_TOKEN are set; defaulting to API key in auto mode. Set QUILT_AUTH_MODE explicitly to override."
+                echo "X-Api-Key: $QUILT_API_KEY"
+            elif [[ -n "$QUILT_API_KEY" ]]; then
+                echo "X-Api-Key: $QUILT_API_KEY"
+            elif [[ -n "$QUILT_TOKEN" ]]; then
+                echo "Authorization: Bearer $QUILT_TOKEN"
+            else
+                die "No authentication configured. Set QUILT_API_KEY or QUILT_TOKEN."
+            fi
+            ;;
+        *)
+            die "Invalid QUILT_AUTH_MODE='$QUILT_AUTH_MODE' (expected: auto|token|api-key)"
+            ;;
+    esac
 }
 
 api_request() {
@@ -271,15 +306,6 @@ json_get_string_best_effort() {
     fi
 }
 
-parse_async_mode_flag() {
-    local arg="$1"
-    case "$arg" in
-        --async) echo "true"; return 0 ;;
-        --sync) echo "false"; return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 print_async_hint_if_present() {
     local response="$1"
     local operation_id=""
@@ -302,6 +328,96 @@ print_async_hint_if_present() {
     fi
 }
 
+extract_operation_id() {
+    local response="$1"
+    local operation_id=""
+
+    if have_cmd jq; then
+        operation_id=$(echo "$response" | jq -r '.operation_id // empty')
+    else
+        operation_id=$(echo "$response" | json_get_string_best_effort "operation_id")
+    fi
+
+    printf '%s' "$operation_id"
+}
+
+wait_for_operation_event() {
+    local operation_id="$1"
+    local timeout_ms="${2:-300000}"
+
+    [[ -n "$operation_id" ]] || die "wait_for_operation_event requires operation_id"
+    have_cmd jq || die "Event-driven operation waiting requires jq."
+
+    local url="${QUILT_API_URL}/api/events"
+    local auth_header
+    auth_header=$(get_auth_header)
+    local timeout_s=$(( (timeout_ms + 999) / 1000 ))
+
+    log_info "Waiting for operation via SSE stream: $operation_id (timeout=${timeout_ms}ms)"
+
+    local line event_name="" data_payload=""
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        if [[ -z "$line" ]]; then
+            if [[ -n "$data_payload" ]]; then
+                local op_id status
+                op_id=$(echo "$data_payload" | jq -r 'if .type == "OperationUpdate" then .data.operation_id // empty else empty end' 2>/dev/null || true)
+                if [[ "$op_id" == "$operation_id" ]]; then
+                    status=$(echo "$data_payload" | jq -r '.data.status // empty' 2>/dev/null || true)
+                    case "$status" in
+                        succeeded)
+                            log_success "Operation $operation_id succeeded."
+                            echo "$data_payload" | jq '.data'
+                            return 0
+                            ;;
+                        failed|cancelled|timed_out)
+                            log_error "Operation $operation_id ended with status: $status"
+                            echo "$data_payload" | jq '.data'
+                            return 1
+                            ;;
+                        accepted|queued|running)
+                            log_info "Operation $operation_id status: $status"
+                            ;;
+                        *)
+                            ;;
+                    esac
+                fi
+            fi
+            event_name=""
+            data_payload=""
+            continue
+        fi
+
+        case "$line" in
+            event:*)
+                event_name="${line#event: }"
+                ;;
+            data:*)
+                local chunk="${line#data: }"
+                if [[ -n "$data_payload" ]]; then
+                    data_payload+=$'\n'
+                fi
+                data_payload+="$chunk"
+                ;;
+        esac
+    done < <(curl -sS -N --connect-timeout 10 --max-time "$timeout_s" \
+        -H "$auth_header" \
+        -H 'Accept: text/event-stream' \
+        "$url")
+
+    log_error "Timed out waiting for operation $operation_id after ${timeout_ms}ms"
+    return 1
+}
+
+await_operation_from_response() {
+    local response="$1"
+    local timeout_ms="${2:-300000}"
+    local operation_id
+    operation_id=$(extract_operation_id "$response")
+    [[ -n "$operation_id" ]] || die "Operation response did not include operation_id."
+    wait_for_operation_event "$operation_id" "$timeout_ms"
+}
+
 # =============================================================================
 # Container Commands
 # =============================================================================
@@ -319,19 +435,12 @@ cmd_list() {
     local state="${1:-}"
 
     log_info "Listing containers..."
-    local out
-    out=$(api_request GET "/api/containers")
-
+    local endpoint="/api/containers"
     if [[ -n "$state" ]]; then
-        if have_cmd jq; then
-            echo "$out" | jq --arg s "$state" '{containers: (.containers // []) | map(select(.state == $s))}'
-        else
-            log_warn "State filtering requires jq; returning unfiltered list."
-            echo "$out"
-        fi
-    else
-        echo "$out"
-    fi | pretty_json
+        endpoint="${endpoint}?state=$state"
+    fi
+
+    api_request GET "$endpoint" | pretty_json
 }
 
 cmd_get() {
@@ -422,48 +531,26 @@ cmd_logs() {
 cmd_start() {
     local container_id="${1:-}"
     shift || true
-    [[ -n "$container_id" ]] || die "Usage: $0 start <container_id> [--async|--sync]"
+    [[ -n "$container_id" ]] || die "Usage: $0 start <container_id>"
 
-    local async_mode="false"
-    while [[ $# -gt 0 ]]; do
-        local parsed_async
-        if parsed_async=$(parse_async_mode_flag "$1"); then
-            async_mode="$parsed_async"
-            shift
-            continue
-        fi
-        die "Usage: $0 start <container_id> [--async|--sync]"
-    done
+    if [[ $# -gt 0 ]]; then
+        log_warn "start no longer supports async flags; ignoring extra arguments: $*"
+    fi
 
-    log_info "Starting container $container_id (async_mode=$async_mode)..."
-    api_request POST "/api/containers/$container_id/start" "{\"async_mode\":$async_mode}" | pretty_json
+    log_info "Starting container $container_id..."
+    api_request POST "/api/containers/$container_id/start" | pretty_json
 }
 
 cmd_stop() {
     local container_id="${1:-}"
-    shift || true
-    [[ -n "$container_id" ]] || die "Usage: $0 stop <container_id> [--async|--sync]"
+    [[ -n "$container_id" ]] || die "Usage: $0 stop <container_id>"
 
-    local async_mode="false"
-    while [[ $# -gt 0 ]]; do
-        local parsed_async
-        if parsed_async=$(parse_async_mode_flag "$1"); then
-            async_mode="$parsed_async"
-            shift
-            continue
-        fi
-        die "Usage: $0 stop <container_id> [--async|--sync]"
-    done
-
-    log_info "Stopping container $container_id (async_mode=$async_mode)..."
-    api_request_with_status POST "/api/containers/$container_id/stop" "{\"async_mode\":$async_mode}"
-
-    case "$API_STATUS" in
-        200) log_success "Stop completed (sync)." ;;
-        202) log_info "Stop accepted (async)." ; print_async_hint_if_present "$API_RESPONSE" ;;
-        *) log_warn "Unexpected HTTP status for stop: $API_STATUS" ;;
-    esac
-    echo "$API_RESPONSE" | pretty_json
+    local endpoint="/api/containers/$container_id/stop?execution=async"
+    log_info "Stopping container $container_id (operation-driven)..."
+    api_request_with_status POST "$endpoint"
+    [[ "$API_STATUS" == "202" ]] || die "Expected HTTP 202 for stop, got $API_STATUS"
+    print_async_hint_if_present "$API_RESPONSE"
+    await_operation_from_response "$API_RESPONSE"
 }
 
 cmd_kill() {
@@ -476,29 +563,14 @@ cmd_kill() {
 
 cmd_rm() {
     local container_id="${1:-}"
-    shift || true
-    [[ -n "$container_id" ]] || die "Usage: $0 rm <container_id> [--async|--sync]"
+    [[ -n "$container_id" ]] || die "Usage: $0 rm <container_id>"
 
-    local async_mode="false"
-    while [[ $# -gt 0 ]]; do
-        local parsed_async
-        if parsed_async=$(parse_async_mode_flag "$1"); then
-            async_mode="$parsed_async"
-            shift
-            continue
-        fi
-        die "Usage: $0 rm <container_id> [--async|--sync]"
-    done
-
-    log_info "Deleting container $container_id (async_mode=$async_mode)..."
-    api_request_with_status DELETE "/api/containers/$container_id" "{\"async_mode\":$async_mode}"
-
-    case "$API_STATUS" in
-        200) log_success "Delete completed (sync)." ;;
-        202) log_info "Delete accepted (async)." ; print_async_hint_if_present "$API_RESPONSE" ;;
-        *) log_warn "Unexpected HTTP status for delete: $API_STATUS" ;;
-    esac
-    echo "$API_RESPONSE" | pretty_json
+    local endpoint="/api/containers/$container_id?execution=async"
+    log_info "Deleting container $container_id (operation-driven)..."
+    api_request_with_status DELETE "$endpoint"
+    [[ "$API_STATUS" == "202" ]] || die "Expected HTTP 202 for delete, got $API_STATUS"
+    print_async_hint_if_present "$API_RESPONSE"
+    await_operation_from_response "$API_RESPONSE"
 }
 
 cmd_restart() {
@@ -540,54 +612,34 @@ cmd_rename() {
 }
 
 cmd_create() {
-    local async_mode="false"
-    while [[ $# -gt 0 ]]; do
-        local parsed_async
-        if parsed_async=$(parse_async_mode_flag "$1"); then
-            async_mode="$parsed_async"
-            shift
-            continue
-        fi
-        break
-    done
-
     local name="${1:-}"
     shift || true
-    [[ -n "$name" ]] || die "Usage: $0 create [--async|--sync] <name> [command...]"
+    [[ -n "$name" ]] || die "Usage: $0 create <name> [command...]"
 
     local cmd="$*"
 
-    log_info "Creating container '$name' (async_mode=$async_mode)..."
+    log_info "Creating container '$name' (operation-driven)..."
 
-    local payload
+    local payload endpoint
+    endpoint="/api/containers?execution=async"
+
     if [[ -n "$cmd" ]]; then
-        payload="{\"name\":\"$(json_escape "$name")\",\"command\":[\"/bin/sh\",\"-c\",\"$(json_escape "$cmd")\"],\"async_mode\":$async_mode}"
+        payload="{\"name\":\"$(json_escape "$name")\",\"command\":[\"/bin/sh\",\"-c\",\"$(json_escape "$cmd")\"]}"
     else
-        payload="{\"name\":\"$(json_escape "$name")\",\"async_mode\":$async_mode}"
+        payload="{\"name\":\"$(json_escape "$name")\"}"
     fi
 
-    api_request_with_status POST "/api/containers" "$payload"
+    api_request_with_status POST "$endpoint" "$payload"
 
-    case "$API_STATUS" in
-        201) log_success "Container created (sync)." ;;
-        202) log_info "Create accepted (async)." ; print_async_hint_if_present "$API_RESPONSE" ;;
-        *) log_warn "Unexpected HTTP status for create: $API_STATUS" ;;
-    esac
-    echo "$API_RESPONSE" | pretty_json
+    [[ "$API_STATUS" == "202" ]] || die "Expected HTTP 202 for create, got $API_STATUS"
+    print_async_hint_if_present "$API_RESPONSE"
+    await_operation_from_response "$API_RESPONSE"
 }
 
 cmd_create_batch() {
-    local async_mode="false"
     local batch_file=""
 
     while [[ $# -gt 0 ]]; do
-        local parsed_async
-        if parsed_async=$(parse_async_mode_flag "$1"); then
-            async_mode="$parsed_async"
-            shift
-            continue
-        fi
-
         case "$1" in
             --file)
                 batch_file="${2:-}"
@@ -598,143 +650,103 @@ cmd_create_batch() {
                 shift
                 ;;
             *)
-                die "Usage: $0 create-batch [--async|--sync] --file <batch.json>"
+                die "Usage: $0 create-batch --file <batch.json>"
                 ;;
         esac
     done
 
-    [[ -n "$batch_file" ]] || die "Usage: $0 create-batch [--async|--sync] --file <batch.json>"
+    [[ -n "$batch_file" ]] || die "Usage: $0 create-batch --file <batch.json>"
     [[ -f "$batch_file" ]] || die "Batch file not found: $batch_file"
     have_cmd jq || die "create-batch requires jq"
 
-    local payload
-    payload=$(jq -c --argjson async "$async_mode" \
-        'if type == "array" then {items: ., async_mode: $async} else . + {async_mode: $async} end' \
-        "$batch_file") || die "Invalid batch JSON file: $batch_file"
+    local payload endpoint
+    payload=$(jq -c 'if type == "array" then {items: .} else . end' "$batch_file") || die "Invalid batch JSON file: $batch_file"
 
     if ! echo "$payload" | jq -e '.items and (.items | type == "array") and (.items | length > 0)' >/dev/null; then
         die "Batch payload must include non-empty .items array"
     fi
 
-    log_info "Creating batch containers from $batch_file (async_mode=$async_mode)..."
-    api_request_with_status POST "/api/containers/batch" "$payload"
+    endpoint="/api/containers/batch?execution=async"
 
-    case "$API_STATUS" in
-        201) log_success "Batch create completed (sync)." ;;
-        202) log_info "Batch create accepted (async)." ; print_async_hint_if_present "$API_RESPONSE" ;;
-        207) log_warn "Batch create completed with partial failures (207)." ;;
-        *) log_warn "Unexpected HTTP status for batch create: $API_STATUS" ;;
-    esac
-    echo "$API_RESPONSE" | pretty_json
+    log_info "Creating batch containers from $batch_file (operation-driven)..."
+    api_request_with_status POST "$endpoint" "$payload"
+
+    [[ "$API_STATUS" == "202" ]] || die "Expected HTTP 202 for batch create, got $API_STATUS"
+    print_async_hint_if_present "$API_RESPONSE"
+    await_operation_from_response "$API_RESPONSE"
 }
 
 cmd_resume() {
     local container_id="${1:-}"
-    shift || true
-    [[ -n "$container_id" ]] || die "Usage: $0 resume <container_id> [--async|--sync]"
+    [[ -n "$container_id" ]] || die "Usage: $0 resume <container_id>"
 
-    local async_mode="false"
-    while [[ $# -gt 0 ]]; do
-        local parsed_async
-        if parsed_async=$(parse_async_mode_flag "$1"); then
-            async_mode="$parsed_async"
-            shift
-            continue
-        fi
-        die "Usage: $0 resume <container_id> [--async|--sync]"
-    done
+    local endpoint="/api/containers/$container_id/resume?execution=async"
+    log_info "Resuming container $container_id (operation-driven)..."
+    api_request_with_status POST "$endpoint"
 
-    log_info "Resuming container $container_id (async_mode=$async_mode)..."
-    api_request_with_status POST "/api/containers/$container_id/resume" "{\"async_mode\":$async_mode}"
-
-    case "$API_STATUS" in
-        200) log_success "Resume completed (sync)." ;;
-        202) log_info "Resume accepted (async)." ; print_async_hint_if_present "$API_RESPONSE" ;;
-        *) log_warn "Unexpected HTTP status for resume: $API_STATUS" ;;
-    esac
-    echo "$API_RESPONSE" | pretty_json
+    [[ "$API_STATUS" == "202" ]] || die "Expected HTTP 202 for resume, got $API_STATUS"
+    print_async_hint_if_present "$API_RESPONSE"
+    await_operation_from_response "$API_RESPONSE"
 }
 
 cmd_fork() {
     local container_id="${1:-}"
     shift || true
-    [[ -n "$container_id" ]] || die "Usage: $0 fork <container_id> [new_name] [--async|--sync]"
-
-    local async_mode="false"
+    [[ -n "$container_id" ]] || die "Usage: $0 fork <container_id> [new_name]"
     local new_name=""
 
     while [[ $# -gt 0 ]]; do
-        local parsed_async
-        if parsed_async=$(parse_async_mode_flag "$1"); then
-            async_mode="$parsed_async"
-            shift
-            continue
-        fi
         if [[ -z "$new_name" ]]; then
             new_name="$1"
             shift
             continue
         fi
-        die "Usage: $0 fork <container_id> [new_name] [--async|--sync]"
+        die "Usage: $0 fork <container_id> [new_name]"
     done
 
-    local payload
-    payload="{\"async_mode\":$async_mode"
+    local payload endpoint
+    payload="{}"
+    endpoint="/api/containers/$container_id/fork?execution=async"
     if [[ -n "$new_name" ]]; then
-        payload="$payload,\"name\":\"$(json_escape "$new_name")\""
+        payload="{\"name\":\"$(json_escape "$new_name")\"}"
     fi
-    payload="$payload}"
 
-    log_info "Forking container $container_id (async_mode=$async_mode)..."
-    api_request_with_status POST "/api/containers/$container_id/fork" "$payload"
+    log_info "Forking container $container_id (operation-driven)..."
+    api_request_with_status POST "$endpoint" "$payload"
 
-    case "$API_STATUS" in
-        200) log_success "Fork completed (sync)." ;;
-        202) log_info "Fork accepted (async)." ; print_async_hint_if_present "$API_RESPONSE" ;;
-        *) log_warn "Unexpected HTTP status for fork: $API_STATUS" ;;
-    esac
-    echo "$API_RESPONSE" | pretty_json
+    [[ "$API_STATUS" == "202" ]] || die "Expected HTTP 202 for fork, got $API_STATUS"
+    print_async_hint_if_present "$API_RESPONSE"
+    await_operation_from_response "$API_RESPONSE"
 }
 
 cmd_clone() {
     local snapshot_id="${1:-}"
     shift || true
-    [[ -n "$snapshot_id" ]] || die "Usage: $0 clone <snapshot_id> [name] [--async|--sync]"
-
-    local async_mode="false"
+    [[ -n "$snapshot_id" ]] || die "Usage: $0 clone <snapshot_id> [name]"
     local name=""
 
     while [[ $# -gt 0 ]]; do
-        local parsed_async
-        if parsed_async=$(parse_async_mode_flag "$1"); then
-            async_mode="$parsed_async"
-            shift
-            continue
-        fi
         if [[ -z "$name" ]]; then
             name="$1"
             shift
             continue
         fi
-        die "Usage: $0 clone <snapshot_id> [name] [--async|--sync]"
+        die "Usage: $0 clone <snapshot_id> [name]"
     done
 
-    local payload
-    payload="{\"async_mode\":$async_mode"
+    local payload endpoint
+    payload="{}"
+    endpoint="/api/snapshots/$snapshot_id/clone?execution=async"
     if [[ -n "$name" ]]; then
-        payload="$payload,\"name\":\"$(json_escape "$name")\""
+        payload="{\"name\":\"$(json_escape "$name")\"}"
     fi
-    payload="$payload}"
 
-    log_info "Cloning snapshot $snapshot_id (async_mode=$async_mode)..."
-    api_request_with_status POST "/api/snapshots/$snapshot_id/clone" "$payload"
+    log_info "Cloning snapshot $snapshot_id (operation-driven)..."
+    api_request_with_status POST "$endpoint" "$payload"
 
-    case "$API_STATUS" in
-        200) log_success "Clone completed (sync)." ;;
-        202) log_info "Clone accepted (async)." ; print_async_hint_if_present "$API_RESPONSE" ;;
-        *) log_warn "Unexpected HTTP status for clone: $API_STATUS" ;;
-    esac
-    echo "$API_RESPONSE" | pretty_json
+    [[ "$API_STATUS" == "202" ]] || die "Expected HTTP 202 for clone, got $API_STATUS"
+    print_async_hint_if_present "$API_RESPONSE"
+    await_operation_from_response "$API_RESPONSE"
 }
 
 cmd_op_status() {
@@ -748,66 +760,17 @@ cmd_op_status() {
 cmd_op_wait() {
     local operation_id="${1:-}"
     shift || true
-    [[ -n "$operation_id" ]] || die "Usage: $0 op-wait <operation_id> [--interval-ms=<ms>] [--timeout-ms=<ms>]"
+    [[ -n "$operation_id" ]] || die "Usage: $0 op-wait <operation_id> [--timeout-ms=<ms>]"
 
-    local interval_ms=1000
     local timeout_ms=300000
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --interval-ms=*) interval_ms="${1#*=}"; shift ;;
             --timeout-ms=*) timeout_ms="${1#*=}"; shift ;;
-            *) die "Usage: $0 op-wait <operation_id> [--interval-ms=<ms>] [--timeout-ms=<ms>]" ;;
+            *) die "Usage: $0 op-wait <operation_id> [--timeout-ms=<ms>]" ;;
         esac
     done
 
-    local start_s now_s elapsed_ms sleep_s
-    start_s=$(date +%s)
-
-    while true; do
-        api_request_with_status GET "/api/operations/$operation_id"
-        local status
-        if have_cmd jq; then
-            status=$(echo "$API_RESPONSE" | jq -r '.status // empty')
-        else
-            status=$(echo "$API_RESPONSE" | json_get_string_best_effort "status")
-        fi
-
-        if [[ -z "$status" ]]; then
-            log_warn "Operation status field missing; printing payload."
-            echo "$API_RESPONSE" | pretty_json
-            return 1
-        fi
-
-        case "$status" in
-            succeeded)
-                log_success "Operation $operation_id succeeded."
-                echo "$API_RESPONSE" | pretty_json
-                return 0
-                ;;
-            failed|cancelled|timed_out)
-                log_error "Operation $operation_id ended with status: $status"
-                echo "$API_RESPONSE" | pretty_json
-                return 1
-                ;;
-            accepted|queued|running)
-                log_info "Operation $operation_id status: $status"
-                ;;
-            *)
-                log_warn "Operation $operation_id unknown status: $status"
-                ;;
-        esac
-
-        now_s=$(date +%s)
-        elapsed_ms=$(( (now_s - start_s) * 1000 ))
-        if (( elapsed_ms >= timeout_ms )); then
-            log_error "Timed out waiting for operation $operation_id after ${elapsed_ms}ms"
-            echo "$API_RESPONSE" | pretty_json
-            return 1
-        fi
-
-        sleep_s=$(awk "BEGIN { printf \"%.3f\", $interval_ms / 1000 }")
-        sleep "$sleep_s"
-    done
+    wait_for_operation_event "$operation_id" "$timeout_ms"
 }
 
 cmd_jobs() {
@@ -921,8 +884,11 @@ cmd_volume_delete() {
     local name="${1:-}"
     [[ -n "$name" ]] || die "Usage: $0 volume-delete <name>"
 
-    log_info "Deleting volume '$name'..."
-    api_request DELETE "/api/volumes/$name" | pretty_json
+    log_info "Deleting volume '$name' (operation-driven)..."
+    api_request_with_status DELETE "/api/volumes/$name?execution=async"
+    [[ "$API_STATUS" == "202" ]] || die "Expected HTTP 202 for volume-delete, got $API_STATUS"
+    print_async_hint_if_present "$API_RESPONSE"
+    await_operation_from_response "$API_RESPONSE"
 }
 
 cmd_volume_ls() {
@@ -933,7 +899,7 @@ cmd_volume_ls() {
     local endpoint="/api/volumes/$name/ls"
     if [[ -n "$path" ]]; then
         path=$(trim_leading_slash "$path")
-        endpoint="${endpoint}/${path}"
+        endpoint="${endpoint}?path=$(url_encode "$path")"
     fi
 
     log_info "Listing files in volume '$name'${path:+ at /$path}..."
@@ -1094,6 +1060,158 @@ cmd_network_diag() {
 }
 
 # =============================================================================
+# ICC (JETS Messaging)
+# =============================================================================
+cmd_icc() {
+    api_request GET "/api/icc" | pretty_json
+}
+
+cmd_icc_health() {
+    api_request GET "/api/icc/health" | pretty_json
+}
+
+cmd_icc_streams() {
+    api_request GET "/api/icc/streams" | pretty_json
+}
+
+cmd_icc_schema() {
+    api_request GET "/api/icc/schema" | pretty_json
+}
+
+cmd_icc_types() {
+    api_request GET "/api/icc/types" | pretty_json
+}
+
+cmd_icc_proto() {
+    log_info "Fetching ICC protobuf source..."
+    api_request GET "/api/icc/proto"
+}
+
+cmd_icc_descriptor() {
+    api_request GET "/api/icc/descriptor" | pretty_json
+}
+
+cmd_icc_publish() {
+    local envelope_b64="${1:-}"
+    [[ -n "$envelope_b64" ]] || die "Usage: $0 icc-publish <envelope_b64>"
+    local payload
+    payload="{\"envelope_b64\":\"$(json_escape "$envelope_b64")\"}"
+    api_request POST "/api/icc/messages" "$payload" | pretty_json
+}
+
+cmd_icc_publish_file() {
+    local file_path="${1:-}"
+    [[ -n "$file_path" ]] || die "Usage: $0 icc-publish-file <file_with_envelope_b64>"
+    [[ -f "$file_path" ]] || die "File not found: $file_path"
+    local envelope_b64
+    envelope_b64="$(tr -d '\r\n' < "$file_path")"
+    [[ -n "$envelope_b64" ]] || die "Envelope file is empty: $file_path"
+    cmd_icc_publish "$envelope_b64"
+}
+
+cmd_icc_messages() {
+    local container_id="${1:-}"
+    shift || true
+    [[ -n "$container_id" ]] || die "Usage: $0 icc-messages <container_id> [from_seq] [to_seq] [state] [limit]"
+
+    local from_seq="${1:-}"
+    local to_seq="${2:-}"
+    local state="${3:-}"
+    local limit="${4:-}"
+
+    local qs="container_id=$(url_encode "$container_id")"
+    [[ -n "$from_seq" ]] && qs="${qs}&from_seq=$(url_encode "$from_seq")"
+    [[ -n "$to_seq" ]] && qs="${qs}&to_seq=$(url_encode "$to_seq")"
+    [[ -n "$state" ]] && qs="${qs}&state=$(url_encode "$state")"
+    [[ -n "$limit" ]] && qs="${qs}&limit=$(url_encode "$limit")"
+
+    api_request GET "/api/icc/messages?$qs" | pretty_json
+}
+
+cmd_icc_inbox() {
+    local container_id="${1:-}"
+    shift || true
+    [[ -n "$container_id" ]] || die "Usage: $0 icc-inbox <container_id> [from_seq] [to_seq] [state] [limit]"
+
+    local from_seq="${1:-}"
+    local to_seq="${2:-}"
+    local state="${3:-}"
+    local limit="${4:-}"
+
+    local qs=""
+    [[ -n "$from_seq" ]] && qs="${qs}${qs:+&}from_seq=$(url_encode "$from_seq")"
+    [[ -n "$to_seq" ]] && qs="${qs}${qs:+&}to_seq=$(url_encode "$to_seq")"
+    [[ -n "$state" ]] && qs="${qs}${qs:+&}state=$(url_encode "$state")"
+    [[ -n "$limit" ]] && qs="${qs}${qs:+&}limit=$(url_encode "$limit")"
+
+    local endpoint="/api/icc/inbox/$container_id"
+    [[ -n "$qs" ]] && endpoint="${endpoint}?${qs}"
+    api_request GET "$endpoint" | pretty_json
+}
+
+cmd_icc_ack() {
+    local msg_id="${1:-}"
+    local action="${2:-ack}"
+    local reason="${3:-}"
+    [[ -n "$msg_id" ]] || die "Usage: $0 icc-ack <msg_id> [ack|nack] [reason]"
+
+    case "$action" in
+        ack|nack) ;;
+        *) die "icc-ack action must be ack or nack" ;;
+    esac
+
+    local payload
+    payload="{\"msg_id\":\"$(json_escape "$msg_id")\",\"action\":\"$action\""
+    [[ -n "$reason" ]] && payload="${payload},\"reason\":\"$(json_escape "$reason")\""
+    payload="${payload}}"
+
+    api_request POST "/api/icc/ack" "$payload" | pretty_json
+}
+
+cmd_icc_replay() {
+    local container_id="${1:-}"
+    local from_seq="${2:-}"
+    local to_seq="${3:-}"
+    local state="${4:-}"
+    local limit="${5:-}"
+    [[ -n "$container_id" ]] || die "Usage: $0 icc-replay <container_id> [from_seq] [to_seq] [state] [limit]"
+
+    local payload
+    payload="{\"container_id\":\"$(json_escape "$container_id")\""
+    [[ -n "$from_seq" ]] && payload="${payload},\"from_seq\":$from_seq"
+    [[ -n "$to_seq" ]] && payload="${payload},\"to_seq\":$to_seq"
+    [[ -n "$state" ]] && payload="${payload},\"state\":\"$(json_escape "$state")\""
+    [[ -n "$limit" ]] && payload="${payload},\"limit\":$limit"
+    payload="${payload}}"
+
+    api_request POST "/api/icc/replay" "$payload" | pretty_json
+}
+
+cmd_icc_dlq() {
+    local from_seq="${1:-}"
+    local limit="${2:-}"
+    local qs=""
+    [[ -n "$from_seq" ]] && qs="${qs}${qs:+&}from_seq=$(url_encode "$from_seq")"
+    [[ -n "$limit" ]] && qs="${qs}${qs:+&}limit=$(url_encode "$limit")"
+    local endpoint="/api/icc/dlq"
+    [[ -n "$qs" ]] && endpoint="${endpoint}?${qs}"
+    api_request GET "$endpoint" | pretty_json
+}
+
+cmd_icc_dlq_replay() {
+    local stream_seq="${1:-}"
+    local target_container_id="${2:-}"
+    [[ -n "$stream_seq" ]] || die "Usage: $0 icc-dlq-replay <stream_seq> [target_container_id]"
+
+    local payload="{}"
+    if [[ -n "$target_container_id" ]]; then
+        payload="{\"replay_to_container\":\"$(json_escape "$target_container_id")\"}"
+    fi
+
+    api_request POST "/api/icc/dlq/$stream_seq/replay" "$payload" | pretty_json
+}
+
+# =============================================================================
 # Terminal Sessions
 # =============================================================================
 cmd_shell() {
@@ -1108,9 +1226,10 @@ cmd_shell() {
     local session
     session=$(api_request POST "/api/terminal/sessions" "$payload")
 
-    local session_id websocket_url
+    local session_id websocket_url attach_url
     session_id=$(echo "$session" | json_get_string_best_effort "session_id")
     websocket_url=$(echo "$session" | json_get_string_best_effort "websocket_url")
+    attach_url=$(echo "$session" | json_get_string_best_effort "attach_url")
 
     if [[ -n "$session_id" ]]; then
         log_success "Terminal session created: $session_id"
@@ -1118,8 +1237,10 @@ cmd_shell() {
 
     if [[ -n "$websocket_url" ]]; then
         log_info "WebSocket URL: $websocket_url"
+    elif [[ -n "$attach_url" ]]; then
+        log_info "Attach URL: $attach_url"
     else
-        log_warn "No websocket_url in response (check server version / auth method)."
+        log_warn "No websocket_url/attach_url in response (check server version / auth method)."
     fi
 
     echo "$session" | pretty_json
@@ -1146,7 +1267,7 @@ GUI WORKLOADS (QGUI):
       If your current container is non-GUI, create a new container using image prod-gui first.
       1) ./quilt.sh exec <id> "qgui up"
       2) ./quilt.sh exec <id> "apk add --no-cache xeyes xclock && DISPLAY=:1 xeyes & DISPLAY=:1 xclock &"
-      3) curl -sS -H "Authorization: Bearer $QUILT_API_KEY" \
+      3) curl -sS -H "X-Api-Key: $QUILT_API_KEY" \
            "$QUILT_API_URL/api/containers/<id>/gui-url"
          Open returned gui_url immediately.
     Note: direct /gui/<id>/ may return 401 in API-key flows; use the signed gui_url endpoint.
@@ -1156,28 +1277,28 @@ SYSTEM:
     system                       Get system info
 
 CONTAINERS:
-    list [state]                 List containers (state filter requires jq)
+    list [state]                 List containers (state filter is strict server-side validation)
     get <id>                     Get container details
-    create [--async|--sync] <name> [cmd...]
-                                 Create a container (default async_mode=false)
-    create-batch [--async|--sync] --file <batch.json>
-                                 Batch create containers (default async_mode=false)
+    create <name> [cmd...]
+                                 Create a container (operation-driven)
+    create-batch --file <batch.json>
+                                 Batch create containers
     rename <id> <new_name>       Rename a container
 
-    start <id> [--async|--sync]  Start a container (immediate start response)
-    stop <id> [--async|--sync]   Stop a container
+    start <id>                   Start a container
+    stop <id>                    Stop a container
     restart <id>                 Restart a container (stop + start)
     kill <id>                    Force kill a container
-    rm <id> [--async|--sync]     Delete a container
-    resume <id> [--async|--sync] Resume a container
-    fork <id> [name] [--async|--sync]
+    rm <id>                      Delete a container
+    resume <id>                  Resume a container
+    fork <id> [name]
                                  Fork a container
-    clone <snapshot_id> [name] [--async|--sync]
+    clone <snapshot_id> [name]
                                  Clone snapshot into a new container
 
     exec <id> [opts] <cmd>       Execute command in container
                                  opts:
-                                   --timeout=<ms>   Default 30000, max 600000
+                                   --timeout=<ms>   Default 300000, max 600000
                                    --detach         Run async (check with jobs/job-get)
                                    --workdir=<path> Working directory
                                    --no-capture     Don't capture stdout/stderr
@@ -1198,9 +1319,8 @@ CONTAINERS:
 OPERATIONS:
     op-status <operation_id>     Get operation status
     op-wait <operation_id> [opts]
-                                 Poll until terminal state
+                                 Wait via SSE operation events until terminal state
                                  opts:
-                                   --interval-ms=<ms> Default 1000
                                    --timeout-ms=<ms>  Default 300000
 
 ENVIRONMENT:
@@ -1233,10 +1353,32 @@ NETWORK & MONITORING:
     monitors                     List monitoring processes
     activity [limit]             Activity feed (default 50)
 
+ICC (JETS):
+    icc                          ICC API root info
+    icc-health                   ICC transport health
+    icc-streams                  ICC stream/subject conventions
+    icc-schema                   ICC publish schema summary
+    icc-types                    ICC enums and message states
+    icc-proto                    Raw jets.proto source
+    icc-descriptor               Protobuf descriptor (base64)
+    icc-publish <envelope_b64>   Publish protobuf envelope (base64)
+    icc-publish-file <file>      Publish envelope from file contents
+    icc-messages <container_id> [from_seq] [to_seq] [state] [limit]
+                                 Tenant inbox read path
+    icc-inbox <container_id> [from_seq] [to_seq] [state] [limit]
+                                 Container-scoped inbox read path
+    icc-ack <msg_id> [ack|nack] [reason]
+                                 Ack/nack a message
+    icc-replay <container_id> [from_seq] [to_seq] [state] [limit]
+                                 Replay container inbox
+    icc-dlq [from_seq] [limit]   List dead-letter messages
+    icc-dlq-replay <seq> [to]    Replay DLQ message (optional target override)
+
 ENVIRONMENT VARIABLES:
     QUILT_API_URL                Base URL (default https://backend.quilt.sh)
     QUILT_TOKEN                  JWT auth (Authorization: Bearer ...)
     QUILT_API_KEY                API key auth (X-Api-Key: ...)
+    QUILT_AUTH_MODE              auto|token|api-key (default auto)
 HELPEOF
 }
 
@@ -1300,6 +1442,23 @@ main() {
         network-diag)   cmd_network_diag "$@" ;;
         monitors)       cmd_monitors "$@" ;;
         activity)       cmd_activity "$@" ;;
+
+        # ICC
+        icc)            cmd_icc "$@" ;;
+        icc-health)     cmd_icc_health "$@" ;;
+        icc-streams)    cmd_icc_streams "$@" ;;
+        icc-schema)     cmd_icc_schema "$@" ;;
+        icc-types)      cmd_icc_types "$@" ;;
+        icc-proto)      cmd_icc_proto "$@" ;;
+        icc-descriptor) cmd_icc_descriptor "$@" ;;
+        icc-publish)    cmd_icc_publish "$@" ;;
+        icc-publish-file) cmd_icc_publish_file "$@" ;;
+        icc-messages)   cmd_icc_messages "$@" ;;
+        icc-inbox)      cmd_icc_inbox "$@" ;;
+        icc-ack)        cmd_icc_ack "$@" ;;
+        icc-replay)     cmd_icc_replay "$@" ;;
+        icc-dlq)        cmd_icc_dlq "$@" ;;
+        icc-dlq-replay) cmd_icc_dlq_replay "$@" ;;
 
         # Terminal
         shell)          cmd_shell "$@" ;;
