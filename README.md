@@ -37,8 +37,7 @@ Welcome to the Quilt beta program. This repository provides early access to Quil
 | `./quilt.sh exec <id> <command>` | Execute a command in a running container |
 | `./quilt.sh logs <id> [lines]` | Retrieve container logs (default: 100 lines) |
 | `./quilt.sh metrics <id>` | Get real-time container metrics (CPU, memory, etc.) |
-| `./quilt.sh shell <id> [--create-only]` | Open interactive terminal (create + attach), or JSON-only with `--create-only` |
-| `./quilt.sh shell-create <id>` | Create terminal session and return session JSON (legacy behavior) |
+| `./quilt.sh shell <id> [--cols=<n>] [--rows=<n>] [--shell=<abs-path>]` | Open interactive terminal (create + attach) |
 
 ### Additional Features
 

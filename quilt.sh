@@ -1263,14 +1263,17 @@ attach_terminal_node() {
     [[ -n "$ws_url" ]] || die "attach_terminal_node requires websocket URL"
     have_cmd node || die "Interactive terminal attach requires node (for websocket streaming)."
 
-    node - "$ws_url" "$cols" "$rows" <<'NODEEOF'
+    local node_script
+    node_script=$(mktemp "${TMPDIR:-/tmp}/quilt-terminal-attach.XXXXXX") || die "Failed to create temporary node script file"
+
+    cat >"$node_script" <<'NODEEOF'
 const url = process.argv[2];
 const initCols = Number(process.argv[3] || 120);
 const initRows = Number(process.argv[4] || 30);
 const WebSocketCtor = globalThis.WebSocket;
 
 if (!WebSocketCtor) {
-  console.error("[ERROR] Node runtime does not expose WebSocket. Use --create-only and attach with another client.");
+  console.error("[ERROR] Node runtime does not expose WebSocket.");
   process.exit(2);
 }
 
@@ -1289,12 +1292,19 @@ function sendJson(ws, obj) {
   ws.send(JSON.stringify(obj));
 }
 
-const ws = new WebSocketCtor(url);
+const ws = new WebSocketCtor(url, "terminal");
+ws.binaryType = "arraybuffer";
 
 ws.onopen = () => {
+  if (ws.protocol !== "terminal") {
+    process.stderr.write(`[ERROR] WebSocket subprotocol mismatch. expected=terminal got=${ws.protocol || "<empty>"}\n`);
+    ws.close();
+    return;
+  }
+
   const cols = process.stdout.columns || initCols;
   const rows = process.stdout.rows || initRows;
-  sendJson(ws, { type: "resize", cols, rows });
+  ws.send(JSON.stringify({ type: "resize", cols, rows }));
 
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
@@ -1304,25 +1314,34 @@ ws.onopen = () => {
   process.stdin.resume();
   process.stdin.on("data", (chunk) => {
     if (ws.readyState !== WebSocketCtor.OPEN) return;
-    sendJson(ws, { type: "input", data: chunk.toString("utf8") });
+    ws.send(chunk);
   });
 };
 
+const pingInterval = setInterval(() => {
+  if (ws.readyState !== WebSocketCtor.OPEN) return;
+  ws.send(JSON.stringify({ type: "ping", ts: Date.now() }));
+}, 25000);
+
 ws.onmessage = (evt) => {
-  const raw = typeof evt.data === "string" ? evt.data : Buffer.from(evt.data).toString("utf8");
+  if (typeof evt.data !== "string") {
+    const buf = Buffer.isBuffer(evt.data) ? evt.data : Buffer.from(evt.data);
+    process.stdout.write(buf);
+    return;
+  }
+
+  const raw = evt.data;
   let msg;
   try {
     msg = JSON.parse(raw);
   } catch (_) {
-    process.stdout.write(raw);
+    process.stderr.write("[ERROR] Received non-JSON text frame from server.\n");
+    ws.close();
     return;
   }
 
   switch (msg.type) {
     case "ready":
-      break;
-    case "output":
-      if (typeof msg.data === "string") process.stdout.write(msg.data);
       break;
     case "pong":
       break;
@@ -1334,6 +1353,9 @@ ws.onmessage = (evt) => {
       process.stderr.write(`[ERROR] Terminal: ${msg.code || "UNKNOWN"} ${msg.message || ""}\n`);
       ws.close();
       break;
+    case "output":
+      if (typeof msg.data === "string") process.stdout.write(msg.data);
+      break;
     default:
       break;
   }
@@ -1344,6 +1366,7 @@ ws.onerror = () => {
 };
 
 ws.onclose = () => {
+  clearInterval(pingInterval);
   if (closed) return;
   closed = true;
   restoreTty();
@@ -1353,38 +1376,49 @@ ws.onclose = () => {
 process.on("SIGWINCH", () => {
   const cols = process.stdout.columns || initCols;
   const rows = process.stdout.rows || initRows;
-  sendJson(ws, { type: "resize", cols, rows });
+  if (ws.readyState !== WebSocketCtor.OPEN) return;
+  ws.send(JSON.stringify({ type: "resize", cols, rows }));
 });
 
 process.on("SIGINT", () => {
-  sendJson(ws, { type: "signal", signal: "SIGINT" });
+  if (ws.readyState !== WebSocketCtor.OPEN) return;
+  ws.send(JSON.stringify({ type: "signal", signal: "SIGINT" }));
 });
 
-process.on("exit", restoreTty);
+process.on("exit", () => {
+  clearInterval(pingInterval);
+  restoreTty();
+});
 NODEEOF
+
+    node "$node_script" "$ws_url" "$cols" "$rows"
+    local rc=$?
+    rm -f "$node_script"
+    return "$rc"
 }
 
 cmd_shell() {
     local container_id="${1:-}"
     shift || true
-    [[ -n "$container_id" ]] || die "Usage: $0 shell <container_id> [--create-only] [--cols=<n>] [--rows=<n>] [--shell=<path>]"
+    [[ -n "$container_id" ]] || die "Usage: $0 shell <container_id> [--cols=<n>] [--rows=<n>] [--shell=<abs-path>]"
 
-    local create_only=false
     local cols=120
     local rows=30
     local shell_path="/bin/bash"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --create-only|--no-attach) create_only=true; shift ;;
             --cols=*) cols="${1#*=}"; shift ;;
             --rows=*) rows="${1#*=}"; shift ;;
             --shell=*) shell_path="${1#*=}"; shift ;;
             *)
-                die "Usage: $0 shell <container_id> [--create-only] [--cols=<n>] [--rows=<n>] [--shell=<path>]"
+                die "Usage: $0 shell <container_id> [--cols=<n>] [--rows=<n>] [--shell=<abs-path>]"
                 ;;
         esac
     done
+
+    [[ "$shell_path" == /* ]] || die "--shell must be an absolute path (example: /bin/bash)"
+    [[ "$shell_path" != *[[:space:]]* ]] || die "--shell must not include whitespace/args"
 
     log_info "Creating terminal session for container $container_id..."
 
@@ -1394,45 +1428,27 @@ cmd_shell() {
     local session
     session=$(api_request POST "/api/terminal/sessions" "$payload")
 
-    local session_id websocket_url attach_url
+    local session_id protocol_version attach_url
     session_id=$(echo "$session" | json_get_string_best_effort "session_id")
-    websocket_url=$(echo "$session" | json_get_string_best_effort "websocket_url")
+    protocol_version=$(echo "$session" | json_get_string_best_effort "protocol_version")
     attach_url=$(echo "$session" | json_get_string_best_effort "attach_url")
 
     if [[ -n "$session_id" ]]; then
         log_success "Terminal session created: $session_id"
     fi
 
-    if [[ -n "$websocket_url" ]]; then
-        log_info "WebSocket URL: $websocket_url"
-    elif [[ -n "$attach_url" ]]; then
-        log_info "Attach URL: $attach_url"
-    else
-        log_warn "No websocket_url/attach_url in response (check server version / auth method)."
-    fi
+    [[ "$protocol_version" == "terminal" ]] || die "Expected protocol_version=terminal, got '${protocol_version:-<empty>}'"
+    [[ -n "$attach_url" ]] || die "Terminal session created but attach_url was missing."
 
-    if [[ "$create_only" == true ]]; then
-        echo "$session" | pretty_json
-        return 0
-    fi
-
-    local ws_base auth_value ws_attach_url
-    ws_base="${websocket_url:-$attach_url}"
-    [[ -n "$ws_base" ]] || die "Terminal session created but no attach URL was returned."
+    local auth_value ws_attach_url
+    log_info "Attach URL: $attach_url"
 
     auth_value=$(get_auth_value_for_ws_query)
-    ws_attach_url=$(ws_url_with_token "$ws_base" "$auth_value")
-
+    ws_attach_url=$(ws_url_with_token "$attach_url" "$auth_value")
+    [[ "$ws_attach_url" == *"token="* ]] || die "WS attach URL is missing token query parameter."
     log_info "Attaching to terminal session $session_id..."
     attach_terminal_node "$ws_attach_url" "$cols" "$rows"
     return $?
-}
-
-# Backward compatibility alias for scripts that expect JSON-only shell create behavior
-cmd_shell_create() {
-    local container_id="${1:-}"
-    [[ -n "$container_id" ]] || die "Usage: $0 shell-create <container_id>"
-    cmd_shell "$container_id" --create-only
 }
 
 # =============================================================================
@@ -1505,11 +1521,9 @@ CONTAINERS:
 
     shell <id> [opts]            Open interactive terminal (create + attach)
                                  opts:
-                                   --create-only    Create session and print JSON only
                                    --cols=<n>       Initial terminal columns (default 120)
                                    --rows=<n>       Initial terminal rows (default 30)
-                                   --shell=<path>   Shell path in container (default /bin/bash)
-    shell-create <id>            Create terminal session (JSON only; legacy behavior)
+                                   --shell=<path>   Absolute shell path, no args (default /bin/bash)
 
 OPERATIONS:
     op-status <operation_id>     Get operation status
@@ -1657,7 +1671,6 @@ main() {
 
         # Terminal
         shell)          cmd_shell "$@" ;;
-        shell-create|shell-json) cmd_shell_create "$@" ;;
 
         # Help
         help|--help|-h) cmd_help ;;
