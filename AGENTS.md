@@ -433,7 +433,7 @@ Use GUI access only for GUI-capable containers. If a workload needs browser-visi
 
 ## ICC
 
-ICC routes expose platform messaging and inbox behavior.
+ICC is the platform surface for local communication between multiple containers that need a protocol channel between them without going through HTTP and a reverse proxy. Use it when containers need structured inter-container messaging on the local platform network.
 
 Common routes:
 
@@ -473,7 +473,7 @@ Broadcast payload shape:
 }
 ```
 
-Agent rule: ICC is an advanced surface. Use it only when the task explicitly involves message transport or inbox semantics.
+Agent rule: use ICC when multiple containers need direct local comms with a real messaging protocol. Do not reach for it when plain HTTP through the normal reverse-proxy path is the actual requirement.
 
 ## Practical Decision Rules
 
