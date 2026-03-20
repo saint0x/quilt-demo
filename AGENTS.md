@@ -435,6 +435,30 @@ GET /api/containers/<container_id>/gui-url
 
 Use GUI access only for GUI-capable containers. If a workload needs browser-visible desktop behavior, create the container from an image intended for that purpose.
 
+GUI-capable container create shape:
+
+```json
+{
+  "name": "demo-gui",
+  "image": "prod-gui",
+  "oci": false,
+  "working_directory": "/app",
+  "memory_limit_mb": 1024,
+  "cpu_limit_percent": 50,
+  "strict": true,
+  "environment": {
+    "FOO": "bar"
+  },
+  "command": ["/bin/sh", "-c", "echo hello"]
+}
+```
+
+Typical GUI flow:
+
+1. Create a container from a GUI-capable image such as `prod-gui`.
+2. Start the GUI stack inside the container.
+3. Request the signed GUI URL for that container.
+
 ## ICC
 
 ICC is the platform surface for local communication between multiple containers that need a protocol channel between them without going through HTTP and a reverse proxy. Use it when containers need structured inter-container messaging on the local platform network.
