@@ -1,6 +1,6 @@
 # Quilt Platform Agent Guide
 
-This file is the standalone agent guide for the Quilt platform API. Treat it as the operational reference for the platform contract itself: resources, request shapes, lifecycle semantics, and the safest ways to perform common work.
+This file is the standalone agent guide for the Quilt platform. Treat it as the operational reference for the platform surfaces as a whole: direct runtime usage through `quilt.sh`, orchestration usage through `quiltc`, and the underlying API contracts they map onto.
 
 ## Scope
 
@@ -14,63 +14,12 @@ Use this guide when working with:
 - operations
 - GUI access
 - ICC messaging
-
-Do not use this guide for cluster orchestration semantics such as workloads, replicas, placements, or node scheduling. Those belong to a separate control plane.
-
-When the task is about that control plane, use `quiltc`. It is Quilt's Kubernetes-like CLI for clusters, nodes, workloads, placements, join tokens, agent reporting, and backend-driven Kubernetes manifest workflows.
-
-## `quiltc` Control Plane
-
-Use `quiltc` when the job is not "operate on one runtime object directly" but instead:
-
-- create or inspect clusters
-- mint join tokens
-- register, heartbeat, drain, or delete nodes
-- create, update, or delete workloads
-- reconcile placements across nodes
-- follow long-running control-plane operations
-- apply or diff Kubernetes manifests against Quilt backend `k8s` endpoints
-
-Core mental model:
-
-- cluster = desired-state control plane
-- node = agent-managed host participating in a cluster
-- workload = desired replicated application spec
-- placement = scheduler assignment of a workload replica onto a node
-
-Important `quiltc` auth inputs:
-
-- `QUILT_BASE_URL`
-- `QUILT_API_KEY`
-- `QUILT_JWT`
-- `QUILT_JOIN_TOKEN` for node registration
-
-Common `quiltc` flows:
-
-```bash
-# Cluster lifecycle
-quiltc clusters create --name demo --pod-cidr 10.70.0.0/16 --node-cidr-prefix 24
-quiltc clusters list
-quiltc clusters get <cluster_id>
-
-# Node enrollment
-quiltc clusters join-token-create <cluster_id> --ttl-secs 600 --max-uses 1
-quiltc agent register <cluster_id> --join-token <join_token> --name node-a
-quiltc agent heartbeat <cluster_id> <node_id> --state ready
-
-# Desired-state scheduling
-quiltc clusters workload-create <cluster_id> '{"name":"demo","replicas":3,"command":["sh","-lc","echo hi; tail -f /dev/null"],"memory_limit_mb":128}'
-quiltc clusters reconcile <cluster_id>
-quiltc clusters placements <cluster_id>
-
-# Backend-driven Kubernetes workflows
-quiltc k8s validate -f ./manifests --namespace default
-quiltc k8s apply -f ./manifests --cluster-id <cluster_id> --follow
-quiltc k8s diff -f ./manifests --cluster-id <cluster_id>
-quiltc k8s status --operation <operation_id> --cluster-id <cluster_id> --follow
-```
-
-Agent rule: if the user is asking for cluster behavior, node behavior, workload replicas, or Kubernetes-like apply/reconcile flows, switch from the direct runtime API model in this file to `quiltc`.
+- clusters
+- nodes
+- workloads
+- placements
+- join tokens
+- Kubernetes-style manifest workflows
 
 ## Authentication
 
@@ -530,6 +479,122 @@ Broadcast payload shape:
 
 Agent rule: use ICC when multiple containers need direct local comms with a real messaging protocol. Do not reach for it when plain HTTP through the normal reverse-proxy path is the actual requirement.
 
+## CLI Surfaces
+
+The Quilt platform includes both the direct runtime shell client and the control-plane CLI. They live in the same platform guide and should be used together as needed.
+
+### `quilt.sh` Runtime CLI
+
+`quilt.sh` is the direct runtime shell client for Quilt.
+
+Use `quilt.sh` for:
+
+- health and system checks
+- container lifecycle
+- exec, logs, metrics, and shell access
+- snapshots, forks, clones, and operation waiting
+- volumes and file transfer
+- network diagnostics
+- GUI URL access
+- ICC-related runtime tasks
+
+Common `quilt.sh` flows:
+
+```bash
+# Health and discovery
+./quilt.sh health
+./quilt.sh system
+./quilt.sh list
+./quilt.sh get <container_id>
+./quilt.sh get-by-name <container_name>
+
+# Container lifecycle
+./quilt.sh create demo
+./quilt.sh create demo --image prod-gui
+./quilt.sh ready <container_id>
+./quilt.sh start <container_id>
+./quilt.sh stop <container_id>
+./quilt.sh resume <container_id>
+./quilt.sh rm <container_id>
+
+# Exec and runtime inspection
+./quilt.sh exec <container_id> "pwd"
+./quilt.sh exec <container_id> --workdir=/app "npm test"
+./quilt.sh logs <container_id> 100
+./quilt.sh metrics <container_id>
+./quilt.sh jobs <container_id>
+
+# Files, volumes, and snapshots
+./quilt.sh sync <container_id> ./local-dir /app
+./quilt.sh volume-create demo-data
+./quilt.sh volume-put demo-data ./local.txt /remote.txt
+./quilt.sh snapshot <container_id>
+./quilt.sh snapshots
+./quilt.sh clone <snapshot_id> demo-clone
+
+# Diagnostics and async state
+./quilt.sh network
+./quilt.sh network-diag <container_id>
+./quilt.sh activity 50
+./quilt.sh op-status <operation_id>
+./quilt.sh op-wait <operation_id> --timeout-ms=300000
+```
+
+### `quiltc` Control Plane CLI
+
+`quiltc` is the control-plane CLI for Quilt.
+
+GitHub: [ariacomputecompany/quiltc](https://github.com/ariacomputecompany/quiltc)
+
+Use `quiltc` for:
+
+- create or inspect clusters
+- mint join tokens
+- register, heartbeat, drain, or delete nodes
+- create, update, or delete workloads
+- reconcile placements across nodes
+- follow long-running control-plane operations
+- apply or diff Kubernetes manifests against Quilt backend `k8s` endpoints
+
+Core mental model:
+
+- cluster = desired-state control plane
+- node = agent-managed host participating in a cluster
+- workload = desired replicated application spec
+- placement = scheduler assignment of a workload replica onto a node
+
+Important `quiltc` auth inputs:
+
+- `QUILT_BASE_URL`
+- `QUILT_API_KEY`
+- `QUILT_JWT`
+- `QUILT_JOIN_TOKEN` for node registration
+
+Common `quiltc` flows:
+
+```bash
+# Cluster lifecycle
+quiltc clusters create --name demo --pod-cidr 10.70.0.0/16 --node-cidr-prefix 24
+quiltc clusters list
+quiltc clusters get <cluster_id>
+
+# Node enrollment
+quiltc clusters join-token-create <cluster_id> --ttl-secs 600 --max-uses 1
+quiltc agent register <cluster_id> --join-token <join_token> --name node-a
+quiltc agent heartbeat <cluster_id> <node_id> --state ready
+
+# Desired-state scheduling
+quiltc clusters workload-create <cluster_id> '{"name":"demo","replicas":3,"command":["sh","-lc","echo hi; tail -f /dev/null"],"memory_limit_mb":128}'
+quiltc clusters reconcile <cluster_id>
+quiltc clusters placements <cluster_id>
+
+# Backend-driven Kubernetes workflows
+quiltc k8s validate -f ./manifests --namespace default
+quiltc k8s apply -f ./manifests --cluster-id <cluster_id> --follow
+quiltc k8s diff -f ./manifests --cluster-id <cluster_id>
+quiltc k8s status --operation <operation_id> --cluster-id <cluster_id> --follow
+```
+
 ## Practical Decision Rules
 
 - If the platform may be down, check `GET /health` first.
@@ -539,4 +604,5 @@ Agent rule: use ICC when multiple containers need direct local comms with a real
 - If state must persist across container replacement, use volumes.
 - If state must be reproducible, snapshot first and clone from that snapshot.
 - If diagnosing connectivity, inspect container network diagnostics before changing routes or IP assignments.
-- If the task is about clusters, nodes, workloads, placements, join tokens, or Kubernetes manifests, use `quiltc` instead of treating it like a direct runtime call.
+- If the task is about direct runtime resources, use the `quilt.sh` patterns and runtime contract in this guide.
+- If the task is about clusters, nodes, workloads, placements, join tokens, or Kubernetes manifests, use the `quiltc` patterns in this guide.

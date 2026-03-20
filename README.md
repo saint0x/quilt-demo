@@ -4,21 +4,65 @@ Welcome to the Quilt beta program. This repository provides early access to Quil
 
 ## About
 
-This repo focuses on Quilt's direct runtime API surface and its shell client for working with individual containers, volumes, snapshots, networking, exec jobs, and related runtime operations.
+Quilt has two primary CLI surfaces that together make up the platform guide:
 
-Quilt also has a separate Kubernetes-like control-plane CLI named `quiltc`. Use that when the task is about:
+- `quilt.sh` for direct runtime operations on containers, snapshots, volumes, network state, exec jobs, GUI access, and related runtime APIs
+- `quiltc` for clusters, nodes, workloads, placements, reconciliation, join tokens, and Kubernetes-style manifest workflows
 
-- clusters
-- node registration and heartbeats
-- workloads and replicas
-- placements and reconciliation
-- join tokens
-- Kubernetes manifest apply, diff, validate, export, and status flows
+This README covers both.
 
-Short version:
+## `quilt.sh` Overview
 
-- use `quilt.sh` for direct runtime work on individual containers and runtime resources
-- use `quiltc` for desired-state orchestration and cluster control-plane workflows
+`quilt.sh` is the direct runtime shell client for the Quilt platform. Use it when you need hands-on control of runtime resources and want a thin wrapper over the runtime API contract.
+
+Typical `quilt.sh` flows:
+
+```bash
+# Health and discovery
+./quilt.sh health
+./quilt.sh system
+./quilt.sh list
+./quilt.sh get <container_id>
+./quilt.sh get-by-name <container_name>
+
+# Container lifecycle
+./quilt.sh create demo
+./quilt.sh create demo --image prod-gui
+./quilt.sh start <container_id>
+./quilt.sh ready <container_id>
+./quilt.sh stop <container_id>
+./quilt.sh resume <container_id>
+./quilt.sh rm <container_id>
+
+# Exec, logs, metrics
+./quilt.sh exec <container_id> "pwd"
+./quilt.sh exec <container_id> --workdir=/app "npm test"
+./quilt.sh logs <container_id> 100
+./quilt.sh metrics <container_id>
+
+# Files, volumes, and snapshots
+./quilt.sh sync <container_id> ./local-dir /app
+./quilt.sh volume-create demo-data
+./quilt.sh volume-put demo-data ./local.txt /remote.txt
+./quilt.sh snapshot <container_id>
+./quilt.sh snapshots
+./quilt.sh clone <snapshot_id> demo-clone
+
+# Runtime diagnostics
+./quilt.sh network
+./quilt.sh network-diag <container_id>
+./quilt.sh activity 50
+./quilt.sh op-status <operation_id>
+./quilt.sh op-wait <operation_id> --timeout-ms=300000
+```
+
+`quilt.sh` mental model:
+
+- container = primary runtime unit
+- exec job = command launched inside a container
+- operation = async lifecycle action such as create, stop, resume, delete, fork, or clone
+- snapshot = durable captured state for clone and lineage workflows
+- volume = persistent filesystem data outside a single container
 
 ## `quiltc` Overview
 
@@ -26,6 +70,8 @@ Short version:
 
 - control-plane resources such as clusters, nodes, workloads, placements, and join tokens
 - runtime resources such as containers, snapshots, volumes, operations, and events
+
+GitHub: [ariacomputecompany/quiltc](https://github.com/ariacomputecompany/quiltc)
 
 Default auth and config inputs:
 
@@ -204,29 +250,28 @@ QUILT_API_KEY="quilt_sk_..."
 ./quilt.sh logs abc123 50
 ```
 
-## When To Use Which Tool
+## Platform Surfaces
 
-Use `quilt.sh` when you already know the runtime object you want to act on and need direct access to:
+The Quilt platform includes both direct runtime operations and control-plane orchestration.
 
-- container create, exec, logs, metrics, start, stop, resume, kill, delete
-- snapshots, forks, clones
-- volumes and file movement
-- per-container network diagnostics
-- GUI URL access
-- ICC and lower-level runtime APIs
+Use `quilt.sh` for:
 
-Use `quiltc` when you need higher-level orchestration or operator-style workflows:
+- container lifecycle, exec, logs, metrics, and shell access
+- snapshots, forks, clones, and operation tracking
+- volume creation and file movement
+- per-container network diagnostics and runtime inspection
+- GUI URL access and ICC-related runtime APIs
 
-- create and manage clusters
-- enroll, heartbeat, drain, or delete nodes
-- declare workloads with replicas
-- reconcile placements
-- work with join tokens and agent reporting
-- run Kubernetes manifest workflows against Quilt backend `/api/k8s/*`
+Use `quiltc` for:
 
-If the question is "how do I run or inspect one container?", reach for `quilt.sh`.
+- cluster lifecycle
+- node registration, heartbeat, drain, and deletion
+- workload specs with replicas
+- placements and reconciliation
+- join tokens and agent reporting
+- Kubernetes manifest validate, apply, diff, status, export, and resource operations
 
-If the question is "how do I manage a fleet, a cluster, or desired state?", reach for `quiltc`.
+Both are part of the same Quilt platform story. `quilt.sh` is the runtime-focused surface. `quiltc` is the orchestration-focused surface.
 
 ---
 
