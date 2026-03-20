@@ -1,258 +1,503 @@
-# Quilt Agent Guide
+# Quilt Platform Agent Guide
 
-This repo ships `./quilt.sh`, a direct CLI for working with Quilt containers and related platform APIs. Use this file as the agent-facing operating guide. Treat it as the practical "how we work here" reference, separate from the shell implementation.
+This file is the standalone agent guide for the Quilt platform API. Treat it as the operational reference for the platform contract itself: resources, request shapes, lifecycle semantics, and the safest ways to perform common work.
 
-## What `quilt.sh` Is For
+## Scope
 
-Use `./quilt.sh` when you need to work with individual Quilt containers directly:
+Use this guide when working with:
 
-- inspect container state
-- create, start, stop, resume, or delete containers
-- run commands inside containers
-- upload files or sync a local directory into a container
-- inspect logs, jobs, metrics, networking, volumes, snapshots, and ICC messaging
+- containers
+- exec jobs
+- snapshots
+- volumes
+- network state
+- operations
+- GUI access
+- ICC messaging
 
-Do not use `./quilt.sh` for cluster-style orchestration. If the task is about workloads, replicas, node placement, or distributed scheduling, use `quiltc` instead.
+Do not use this guide for cluster orchestration semantics such as workloads, replicas, placements, or node scheduling. Those belong to a separate control plane.
 
-## Before You Start
+## Authentication
 
-Quilt commands usually need authentication. Prefer an API key unless the task specifically requires a JWT token.
+Most API routes require one of these headers:
 
-Expected environment variables:
+- `X-Api-Key: <key>`
+- `Authorization: Bearer <token>`
 
-- `QUILT_API_URL`
-  Default: `https://backend.quilt.sh`
-- `QUILT_API_KEY`
-  Preferred auth mechanism
-- `QUILT_TOKEN`
-  Optional bearer token auth
-- `QUILT_AUTH_MODE`
-  One of `auto`, `api-key`, or `token`
+Default base URL:
 
-Recommended setup:
-
-```bash
-set -a
-source .env
-set +a
+```text
+https://backend.quilt.sh
 ```
 
-Quick sanity checks:
+Public health check:
 
-```bash
-./quilt.sh health
-./quilt.sh list
+```text
+GET /health
 ```
 
-## Default Working Style
+System info:
 
-When helping in this repo:
-
-- start by checking `health` and `list`
-- prefer looking up a container by exact ID; if you only have a name, use `get-by-name`
-- treat create, stop, resume, delete, fork, clone, and volume delete as operation-driven commands that may wait for completion
-- prefer small, explicit commands over clever shell pipelines unless the task clearly benefits from automation
-- if a task is container-specific, verify readiness with `./quilt.sh ready <id>` before assuming the container is usable
-
-## Common Container Tasks
-
-List and inspect:
-
-```bash
-./quilt.sh list
-./quilt.sh list running
-./quilt.sh get <container_id>
-./quilt.sh get-by-name <container_name>
-./quilt.sh ready <container_id>
-./quilt.sh metrics <container_id>
-./quilt.sh logs <container_id> 100
+```text
+GET /api/system/info
 ```
 
-Create and lifecycle:
+Agent rule: confirm platform health before diagnosing higher-level failures.
 
-```bash
-./quilt.sh create <name>
-./quilt.sh create <name> --image prod-gui
-./quilt.sh create <name> --workdir /app --env FOO=bar -- echo hello
-./quilt.sh start <container_id>
-./quilt.sh stop <container_id>
-./quilt.sh resume <container_id>
-./quilt.sh rm <container_id>
-./quilt.sh rename <container_id> <new_name>
+## Core Resource Model
+
+Think in terms of stable resources:
+
+- containers are the primary runtime unit
+- exec jobs are commands launched inside a container
+- operations represent async lifecycle work
+- snapshots capture container state for cloning and lineage
+- volumes hold persistent filesystem data
+- network resources expose container addressing and diagnostics
+
+A typical troubleshooting flow is:
+
+1. confirm API health
+2. resolve the target container
+3. inspect readiness and current state
+4. act
+5. inspect the resulting operation or exec job
+
+## Containers
+
+Primary routes:
+
+```text
+GET    /api/containers
+GET    /api/containers?state=<state>
+GET    /api/containers/<container_id>
+GET    /api/containers/by-name/<name>
+GET    /api/containers/<container_id>/ready
+GET    /api/containers/<container_id>/metrics
+GET    /api/containers/<container_id>/logs?limit=<n>
+POST   /api/containers
+POST   /api/containers/<container_id>/start
+POST   /api/containers/<container_id>/stop?execution=async
+POST   /api/containers/<container_id>/resume?execution=async
+POST   /api/containers/<container_id>/kill
+DELETE /api/containers/<container_id>?execution=async
+POST   /api/containers/<container_id>/rename
 ```
 
-Run commands:
+Important semantics:
 
-```bash
-./quilt.sh exec <container_id> "pwd"
-./quilt.sh exec <container_id> --workdir=/app "npm test"
-./quilt.sh exec <container_id> --detach "long-running-command"
-./quilt.sh exec-b64 <container_id> "command with tricky quoting"
+- `start` is immediate
+- `stop`, `resume`, and delete are operation-driven and should return `202`
+- readiness should be checked explicitly; do not assume a created or resumed container is ready yet
+- resolving by name is helpful, but IDs are the safer handle once a target is known
+
+Create request shape:
+
+```json
+{
+  "name": "demo",
+  "image": "prod-gui",
+  "oci": false,
+  "working_directory": "/app",
+  "memory_limit_mb": 1024,
+  "cpu_limit_percent": 50,
+  "strict": true,
+  "environment": {
+    "FOO": "bar"
+  },
+  "command": ["/bin/sh", "-c", "echo hello"]
+}
 ```
 
-Operational introspection:
+Notes:
 
-```bash
-./quilt.sh jobs <container_id>
-./quilt.sh job-get <container_id> <job_id>
-./quilt.sh processes <container_id>
-./quilt.sh process-kill <container_id> <pid> TERM
+- `name` is required
+- all other fields are optional
+- `command` is executed as an argv array, not a raw shell blob
+- `strict` is a boolean when supplied
+- create is async-oriented and should be treated as operation-driven
+
+Batch create route:
+
+```text
+POST /api/containers/batch?execution=async
 ```
 
-## File And Directory Transfer
+Batch payload contract:
 
-Use `sync` when you want to send a local project directory into a container. It automatically archives the directory and skips common junk such as `.git`, `node_modules`, `dist`, `.venv`, and Python cache files.
-
-```bash
-./quilt.sh sync <container_id> ./local-dir /app
+```json
+{
+  "items": [
+    { "name": "web-1" },
+    { "name": "web-2", "command": ["/bin/sh", "-c", "echo ready"] }
+  ]
+}
 ```
 
-Use `upload` when you already have an archive:
+## Exec Contract
 
-```bash
-./quilt.sh upload <container_id> ./bundle.tar.gz /app 1
+Primary route:
+
+```text
+POST /api/containers/<container_id>/exec
 ```
 
-Use environment variable commands when you need to adjust runtime configuration:
+String command form:
 
-```bash
-./quilt.sh env-get <container_id>
-./quilt.sh env-set <container_id> KEY=value OTHER=value
-./quilt.sh env-delete <container_id> KEY
+```json
+{
+  "command": "npm test",
+  "capture_output": true,
+  "detach": false,
+  "workdir": "/app",
+  "timeout_ms": 30000
+}
 ```
+
+Base64 command form:
+
+```json
+{
+  "command": {
+    "cmd_b64": "<base64>"
+  },
+  "capture_output": true,
+  "detach": false,
+  "timeout_ms": 30000
+}
+```
+
+Use the base64 form when quoting, newlines, or escaping would make the plain string form brittle.
+
+Exec job inspection routes:
+
+```text
+GET /api/containers/<container_id>/jobs
+GET /api/containers/<container_id>/jobs/<job_id>?include_output=true
+GET /api/containers/<container_id>/processes
+DELETE /api/containers/<container_id>/processes/<pid>?signal=<signal>
+```
+
+Agent rule: for long-running or detached work, inspect jobs instead of guessing whether the command succeeded.
+
+## Operations
+
+Async lifecycle routes typically return an accepted payload containing an operation handle.
+
+Operation lookup:
+
+```text
+GET /api/operations/<operation_id>
+GET /api/events
+```
+
+Accepted response shape:
+
+```json
+{
+  "success": true,
+  "operation_id": "op_123",
+  "status_url": "/api/operations/op_123"
+}
+```
+
+Observed operation statuses:
+
+- `accepted`
+- `queued`
+- `running`
+- `succeeded`
+- `failed`
+- `cancelled`
+- `timed_out`
+
+The event stream emits operation updates. Agents should prefer waiting on the operation status rather than retrying mutating requests blindly.
+
+## Snapshots
+
+Primary routes:
+
+```text
+POST   /api/containers/<container_id>/snapshot
+GET    /api/snapshots
+GET    /api/snapshots?container_id=<container_id>
+GET    /api/snapshots/<snapshot_id>
+GET    /api/snapshots/<snapshot_id>/lineage
+POST   /api/snapshots/<snapshot_id>/clone?execution=async
+POST   /api/snapshots/<snapshot_id>/pin
+POST   /api/snapshots/<snapshot_id>/unpin
+DELETE /api/snapshots/<snapshot_id>
+```
+
+Snapshot creation payload:
+
+```json
+{
+  "consistency_mode": "crash-consistent",
+  "network_mode": "reset",
+  "volume_mode": "exclude"
+}
+```
+
+Clone payload:
+
+```json
+{
+  "name": "clone-name"
+}
+```
+
+Agent rule: use snapshots plus clone when reproducibility matters. Use lineage routes before making assumptions about ancestry.
+
+## Forking
+
+Container fork route:
+
+```text
+POST /api/containers/<container_id>/fork?execution=async
+```
+
+Optional payload:
+
+```json
+{
+  "name": "fork-name"
+}
+```
+
+Fork is the right choice for branching directly from current container state. Clone is the right choice when the source of truth is a snapshot.
+
+## Environment Variables
+
+Primary routes:
+
+```text
+GET   /api/containers/<container_id>/env
+PATCH /api/containers/<container_id>/env
+PUT   /api/containers/<container_id>/env
+```
+
+Patch or replace payload:
+
+```json
+{
+  "environment": {
+    "KEY": "value"
+  }
+}
+```
+
+Use `PATCH` to add or update keys. Use `PUT` when intentionally replacing the environment map with a new desired state.
+
+## Archive And File Transfer
+
+Container archive upload route:
+
+```text
+POST /api/containers/<container_id>/archive
+```
+
+Volume archive upload route:
+
+```text
+POST /api/volumes/<name>/archive
+```
+
+Archive payload contract:
+
+```json
+{
+  "content": "<base64 tar.gz>",
+  "strip_components": 1,
+  "path": "/app"
+}
+```
+
+Single-file volume write:
+
+```text
+POST /api/volumes/<name>/files
+```
+
+Payload:
+
+```json
+{
+  "path": "/remote.txt",
+  "content": "<base64>",
+  "mode": 644
+}
+```
+
+Agent rule: archive upload is the normal shape for syncing a codebase or bundle into a target filesystem.
 
 ## Volumes
 
-Use volumes when data should outlive a single container.
+Primary routes:
 
-```bash
-./quilt.sh volumes
-./quilt.sh volume-create <name>
-./quilt.sh volume-get <name>
-./quilt.sh volume-ls <name>
-./quilt.sh volume-put <name> ./local.txt /remote.txt
-./quilt.sh volume-cat <name> /remote.txt
-./quilt.sh volume-upload <name> ./payload.tar.gz /target 0
-./quilt.sh volume-delete <name>
+```text
+GET    /api/volumes
+POST   /api/volumes
+GET    /api/volumes/<name>
+GET    /api/volumes/<name>/inspect
+GET    /api/volumes/<name>/ls
+GET    /api/volumes/<name>/ls?path=<path>
+GET    /api/volumes/<name>/files/<path>
+DELETE /api/volumes/<name>/files/<path>
+POST   /api/volumes/<name>/rename
+DELETE /api/volumes/<name>?execution=async
 ```
 
-## Snapshots, Forks, And Clones
+Create payload:
 
-Use these when you want to preserve or branch container state:
-
-```bash
-./quilt.sh snapshot <container_id>
-./quilt.sh snapshots
-./quilt.sh snapshot-get <snapshot_id>
-./quilt.sh snapshot-lineage <snapshot_id>
-./quilt.sh fork <container_id> [new_name]
-./quilt.sh clone <snapshot_id> [new_name]
+```json
+{
+  "name": "data-volume",
+  "driver": "local",
+  "labels": {
+    "team": "qa"
+  }
+}
 ```
 
-Prefer `snapshot` plus `clone` when you want a reproducible copy. Prefer `fork` when you want to branch directly from a live container.
+Rename payload:
 
-## Network And Runtime Diagnostics
-
-Use these when debugging connectivity or runtime behavior:
-
-```bash
-./quilt.sh network
-./quilt.sh network-get <container_id>
-./quilt.sh network-diag <container_id>
-./quilt.sh egress <container_id>
-./quilt.sh activity 50
-./quilt.sh monitors
-./quilt.sh cleanup-status
-./quilt.sh cleanup-tasks-global
+```json
+{
+  "new_name": "renamed-volume"
+}
 ```
 
-For interactive shell access:
+Agent rule: choose volumes for persistent state that should survive container replacement.
 
-```bash
-./quilt.sh shell <container_id>
+## Network And Diagnostics
+
+Primary routes:
+
+```text
+GET  /api/network/allocations
+GET  /api/containers/<container_id>/network
+PUT  /api/containers/<container_id>/network
+POST /api/containers/<container_id>/network/setup
+GET  /api/containers/<container_id>/network/diagnostics
+GET  /api/containers/<container_id>/egress
+POST /api/containers/<container_id>/routes
+DELETE /api/containers/<container_id>/routes
+GET  /api/activity?limit=<n>
+GET  /api/monitors/processes
+GET  /api/monitors/profile
+GET  /api/dns/entries
+POST /api/dns/entries/<current_name>/rename
+GET  /api/cleanup/status
+GET  /api/cleanup/tasks
+GET  /api/containers/<container_id>/cleanup/tasks
+POST /api/containers/<container_id>/cleanup/force
 ```
 
-## GUI Containers
+Network set payload:
 
-If the task involves browser-accessible desktop apps, use a GUI-capable image such as `prod-gui`.
-
-Typical flow:
-
-```bash
-./quilt.sh create my-gui --image prod-gui
-./quilt.sh exec <container_id> "qgui up"
-./quilt.sh gui-url <container_id>
+```json
+{
+  "ip_address": "10.42.0.7"
+}
 ```
 
-If the current container is not GUI-capable, create a new GUI container instead of trying to retrofit one blindly.
+Route payload:
 
-## Async And Operation-Driven Commands
-
-Several commands return or wait on an operation rather than finishing instantly. In practice, the script already handles most waiting for you, but you should still understand the model when debugging.
-
-Useful commands:
-
-```bash
-./quilt.sh op-status <operation_id>
-./quilt.sh op-wait <operation_id> --timeout-ms=300000
+```json
+{
+  "destination": "10.0.0.0/24"
+}
 ```
 
-Expect operation-driven behavior around:
+Forced cleanup payload:
 
-- `create`
-- `create-batch`
-- `stop`
-- `resume`
-- `rm`
-- `fork`
-- `clone`
-- `volume-delete`
+```json
+{
+  "confirm": true,
+  "remove_volumes": false
+}
+```
 
-If something looks stuck, inspect the operation before retrying destructive actions.
+Agent rule: inspect network diagnostics before assuming a connectivity issue is application-level.
 
-## ICC And Advanced Platform Surfaces
+## GUI Access
 
-The script also includes ICC, OCI image, DNS, route, and cleanup commands. Reach for those only when the task explicitly touches messaging, image management, or platform internals. For routine container work, the common commands above are usually enough.
+Primary route:
 
-If you need them, run `./quilt.sh help` and follow the existing command names rather than inventing new wrappers.
+```text
+GET /api/containers/<container_id>/gui-url
+```
 
-## Testing Expectations In This Repo
+Use GUI access only for GUI-capable containers. If a workload needs browser-visible desktop behavior, create the container from an image intended for that purpose.
 
-If you change CLI behavior, runtime behavior, or workflows that affect real operations, validate with Fozzy first.
+## ICC
 
-Preferred pattern:
+ICC routes expose platform messaging and inbox behavior.
+
+Common routes:
+
+```text
+GET  /api/icc
+GET  /api/icc/health
+GET  /api/icc/streams
+GET  /api/icc/schema
+GET  /api/icc/types
+GET  /api/containers/<container_id>/icc
+GET  /api/icc/containers/<container_id>/state-version
+GET  /api/icc/proto
+GET  /api/icc/descriptor
+POST /api/icc/messages
+POST /api/icc/messages/broadcast
+POST /api/containers/<container_id>/icc/publish
+```
+
+Publish payload:
+
+```json
+{
+  "envelope_b64": "<base64 protobuf envelope>"
+}
+```
+
+Broadcast payload shape:
+
+```json
+{
+  "envelope_b64": "<base64 protobuf envelope>",
+  "targets": {
+    "container_ids": ["a", "b"],
+    "include_non_running": true,
+    "limit": 10
+  }
+}
+```
+
+Agent rule: ICC is an advanced surface. Use it only when the task explicitly involves message transport or inbox semantics.
+
+## Practical Decision Rules
+
+- If the platform may be down, check `GET /health` first.
+- If the task is about a specific runtime, resolve the container and check readiness before mutating it.
+- If a mutation is async, track the operation instead of issuing duplicate requests.
+- If command quoting is risky, use the base64 exec contract.
+- If state must persist across container replacement, use volumes.
+- If state must be reproducible, snapshot first and clone from that snapshot.
+- If diagnosing connectivity, inspect container network diagnostics before changing routes or IP assignments.
+
+## Testing Expectations
+
+If you change behavior that affects request contracts, lifecycle semantics, or live runtime flows, validate with Fozzy first.
+
+Preferred coverage pattern:
 
 ```bash
 fozzy doctor --deep --scenario <scenario> --runs 5 --seed <seed> --json
 fozzy test --det --strict <scenarios...> --json
-fozzy run <scenario-or-command> --det --record <trace.fozzy> --json
+fozzy run ... --det --record <trace.fozzy> --json
 fozzy trace verify <trace.fozzy> --strict --json
 fozzy replay <trace.fozzy> --json
 fozzy ci <trace.fozzy> --json
 ```
 
-When feasible, include host-backed checks so the validation matches real execution.
-
-## Practical Agent Heuristics
-
-- If the user asks for "is Quilt up?" run `health` first.
-- If the user asks about a specific container, run `get` and `ready` before making changes.
-- If the user asks to push code into a container, prefer `sync`.
-- If the user asks to run one command, prefer `exec`.
-- If the user asks for persistent data handling, use volumes.
-- If the user asks for reproducible state capture, use snapshots.
-- If the user asks for desktop apps in browser, use a GUI image and `gui-url`.
-- If the task sounds like cluster orchestration, stop using `quilt.sh` and switch to `quiltc`.
-
-## One-Minute Quick Start
-
-```bash
-set -a && source .env && set +a
-./quilt.sh health
-./quilt.sh list
-./quilt.sh create demo
-./quilt.sh ready <container_id>
-./quilt.sh exec <container_id> "uname -a"
-./quilt.sh sync <container_id> . /app
-./quilt.sh logs <container_id> 100
-```
+When feasible, include host-backed checks so the validation reflects real execution rather than only mocked paths.
