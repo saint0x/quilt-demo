@@ -20,18 +20,37 @@
 #   ./quilt.sh env-set <id> MY_VAR=value
 #
 # Kubernetes-Style Cluster Management (Optional):
-#   Use this script when you want to interact with individual Quilt containers directly.
+#   Use this script when you want to work with individual runtime resources directly:
+#     - one container
+#     - one snapshot
+#     - one volume
+#     - one network or exec operation
 #
-#   If you are doing cluster management or Kubernetes-type workflows, use `quiltc` instead:
-#     - managing clusters/nodes/workloads/replicas/placements
-#     - running containers at scale across multiple nodes
-#     - distributed systems orchestration and rescheduling
+#   If the task is control-plane or Kubernetes-like, use `quiltc` instead.
+#   `quiltc` is Quilt's Kubernetes-like CLI for:
+#     - clusters
+#     - node registration, heartbeats, draining, and deletion
+#     - workloads, replicas, placements, and reconciliation
+#     - join tokens and agent reporting
+#     - backend-driven Kubernetes manifest workflows
 #
-#   Repo: https://github.com/ariacomputecompany/quiltc
+#   Typical `quiltc` examples:
+#     - quiltc clusters create --name demo --pod-cidr 10.70.0.0/16 --node-cidr-prefix 24
+#     - quiltc clusters join-token-create <cluster_id> --ttl-secs 600 --max-uses 1
+#     - quiltc agent register <cluster_id> --join-token <join_token> --name node-a
+#     - quiltc agent heartbeat <cluster_id> <node_id> --state ready
+#     - quiltc clusters workload-create <cluster_id> '{"name":"demo","replicas":3,...}'
+#     - quiltc clusters reconcile <cluster_id>
+#     - quiltc clusters placements <cluster_id>
+#     - quiltc k8s validate -f ./manifests
+#     - quiltc k8s apply -f ./manifests --cluster-id <cluster_id> --follow
+#
 #   Mapping (high level):
-#     - Workload (replicas) ~ Deployment/ReplicaSet
-#     - Placement (replica_index -> node) ~ Pod scheduled to a Node
-#     - Agent register/heartbeat/report ~ Kubelet node lifecycle + status reporting
+#     - Cluster ~ control plane
+#     - Workload (replicas) ~ Deployment/ReplicaSet desired state
+#     - Placement (replica_index -> node) ~ scheduled pod assignment
+#     - Agent register/heartbeat/report ~ kubelet-style node lifecycle
+#     - Runtime container operations still map to Quilt runtime endpoints
 #
 # GUI Workloads in Containers (Optional):
 #   If you want to run desktop/UI apps inside a Quilt container and view them in browser,
@@ -297,6 +316,15 @@ pretty_json() {
     fi
 }
 
+print_maybe_json() {
+    local value="${1:-}"
+    if have_cmd jq && echo "$value" | jq '.' >/dev/null 2>&1; then
+        echo "$value" | jq '.'
+    else
+        echo "$value"
+    fi
+}
+
 json_get_string_best_effort() {
     local key="$1"
     if have_cmd jq; then
@@ -431,6 +459,23 @@ cmd_system() {
     api_request GET "/api/system/info" | pretty_json
 }
 
+cmd_raw() {
+    local method="${1:-}"
+    local endpoint="${2:-}"
+    shift 2 || true
+
+    [[ -n "$method" && -n "$endpoint" ]] || die "Usage: $0 raw <METHOD> <endpoint> [json_payload]"
+    method=$(echo "$method" | tr '[:lower:]' '[:upper:]')
+    if [[ "$endpoint" != /* ]]; then
+        endpoint="/$endpoint"
+    fi
+
+    local payload="${1:-}"
+    local response
+    response=$(api_request "$method" "$endpoint" "$payload")
+    print_maybe_json "$response"
+}
+
 cmd_list() {
     local state="${1:-}"
 
@@ -449,6 +494,14 @@ cmd_get() {
 
     log_info "Getting container $container_id..."
     api_request GET "/api/containers/$container_id" | pretty_json
+}
+
+cmd_get_by_name() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "Usage: $0 get-by-name <name>"
+
+    log_info "Resolving container by name '$name'..."
+    api_request GET "/api/containers/by-name/$(url_encode "$name")" | pretty_json
 }
 
 cmd_exec() {
@@ -526,6 +579,12 @@ cmd_logs() {
 
     log_info "Getting logs for container $container_id (limit $limit)..."
     api_request GET "/api/containers/$container_id/logs?limit=$limit" | pretty_json
+}
+
+cmd_gui_url() {
+    local container_id="${1:-}"
+    [[ -n "$container_id" ]] || die "Usage: $0 gui-url <container_id>"
+    api_request GET "/api/containers/$container_id/gui-url" | pretty_json
 }
 
 cmd_start() {
@@ -614,20 +673,140 @@ cmd_rename() {
 cmd_create() {
     local name="${1:-}"
     shift || true
-    [[ -n "$name" ]] || die "Usage: $0 create <name> [command...]"
+    [[ -n "$name" ]] || die "Usage: $0 create <name> [options] [-- command...]"
 
-    local cmd="$*"
+    local image=""
+    local use_oci=false
+    local workdir=""
+    local memory_mb=""
+    local cpu_percent=""
+    local strict=""
+    local env_pairs=()
+    local cmd_args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --image)
+                image="${2:-}"
+                [[ -n "$image" ]] || die "create --image requires a value"
+                shift 2
+                ;;
+            --image=*)
+                image="${1#*=}"
+                shift
+                ;;
+            --oci)
+                use_oci=true
+                shift
+                ;;
+            --workdir)
+                workdir="${2:-}"
+                [[ -n "$workdir" ]] || die "create --workdir requires a value"
+                shift 2
+                ;;
+            --workdir=*)
+                workdir="${1#*=}"
+                shift
+                ;;
+            --memory-mb)
+                memory_mb="${2:-}"
+                [[ "$memory_mb" =~ ^[0-9]+$ ]] || die "create --memory-mb must be an integer"
+                shift 2
+                ;;
+            --memory-mb=*)
+                memory_mb="${1#*=}"
+                [[ "$memory_mb" =~ ^[0-9]+$ ]] || die "create --memory-mb must be an integer"
+                shift
+                ;;
+            --cpu)
+                cpu_percent="${2:-}"
+                [[ "$cpu_percent" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "create --cpu must be numeric"
+                shift 2
+                ;;
+            --cpu=*)
+                cpu_percent="${1#*=}"
+                [[ "$cpu_percent" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "create --cpu must be numeric"
+                shift
+                ;;
+            --strict)
+                strict=true
+                shift
+                ;;
+            --no-strict)
+                strict=false
+                shift
+                ;;
+            --env)
+                local pair="${2:-}"
+                [[ -n "$pair" ]] || die "create --env requires KEY=VALUE"
+                [[ "$pair" == *"="* ]] || die "create --env requires KEY=VALUE"
+                env_pairs+=("$pair")
+                shift 2
+                ;;
+            --env=*)
+                local pair="${1#*=}"
+                [[ "$pair" == *"="* ]] || die "create --env requires KEY=VALUE"
+                env_pairs+=("$pair")
+                shift
+                ;;
+            --)
+                shift
+                while [[ $# -gt 0 ]]; do
+                    cmd_args+=("$1")
+                    shift
+                done
+                ;;
+            *)
+                cmd_args+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    local cmd=""
+    if [[ ${#cmd_args[@]} -gt 0 ]]; then
+        cmd="${cmd_args[*]}"
+    fi
 
     log_info "Creating container '$name' (operation-driven)..."
 
     local payload endpoint
     endpoint="/api/containers?execution=async"
 
-    if [[ -n "$cmd" ]]; then
-        payload="{\"name\":\"$(json_escape "$name")\",\"command\":[\"/bin/sh\",\"-c\",\"$(json_escape "$cmd")\"]}"
-    else
-        payload="{\"name\":\"$(json_escape "$name")\"}"
+    payload="{\"name\":\"$(json_escape "$name")\""
+    if [[ -n "$image" ]]; then
+        payload="$payload,\"image\":\"$(json_escape "$image")\""
     fi
+    if [[ "$use_oci" == "true" ]]; then
+        payload="$payload,\"oci\":true"
+    fi
+    if [[ -n "$workdir" ]]; then
+        payload="$payload,\"working_directory\":\"$(json_escape "$workdir")\""
+    fi
+    if [[ -n "$memory_mb" ]]; then
+        payload="$payload,\"memory_limit_mb\":$memory_mb"
+    fi
+    if [[ -n "$cpu_percent" ]]; then
+        payload="$payload,\"cpu_limit_percent\":$cpu_percent"
+    fi
+    if [[ -n "$strict" ]]; then
+        payload="$payload,\"strict\":$strict"
+    fi
+    if [[ ${#env_pairs[@]} -gt 0 ]]; then
+        local env_json="" pair key value
+        for pair in "${env_pairs[@]}"; do
+            key="${pair%%=*}"
+            value="${pair#*=}"
+            [[ -n "$key" ]] || die "create --env key cannot be empty"
+            [[ -n "$env_json" ]] && env_json="$env_json,"
+            env_json="$env_json\"$(json_escape "$key")\":\"$(json_escape "$value")\""
+        done
+        payload="$payload,\"environment\":{$env_json}"
+    fi
+    if [[ -n "$cmd" ]]; then
+        payload="$payload,\"command\":[\"/bin/sh\",\"-c\",\"$(json_escape "$cmd")\"]"
+    fi
+    payload="$payload}"
 
     api_request_with_status POST "$endpoint" "$payload"
 
@@ -749,6 +928,61 @@ cmd_clone() {
     await_operation_from_response "$API_RESPONSE"
 }
 
+cmd_snapshot() {
+    local container_id="${1:-}"
+    [[ -n "$container_id" ]] || die "Usage: $0 snapshot <container_id>"
+
+    local payload
+    payload='{"consistency_mode":"crash-consistent","network_mode":"reset","volume_mode":"exclude"}'
+    log_info "Creating snapshot for container $container_id..."
+    api_request POST "/api/containers/$container_id/snapshot" "$payload" | pretty_json
+}
+
+cmd_snapshots() {
+    local container_id="${1:-}"
+    local endpoint="/api/snapshots"
+    if [[ -n "$container_id" ]]; then
+        endpoint="${endpoint}?container_id=$(url_encode "$container_id")"
+    fi
+    api_request GET "$endpoint" | pretty_json
+}
+
+cmd_snapshot_get() {
+    local snapshot_id="${1:-}"
+    [[ -n "$snapshot_id" ]] || die "Usage: $0 snapshot-get <snapshot_id>"
+    api_request GET "/api/snapshots/$snapshot_id" | pretty_json
+}
+
+cmd_snapshot_lineage() {
+    local snapshot_id="${1:-}"
+    [[ -n "$snapshot_id" ]] || die "Usage: $0 snapshot-lineage <snapshot_id>"
+    api_request GET "/api/snapshots/$snapshot_id/lineage" | pretty_json
+}
+
+cmd_snapshot_rm() {
+    local snapshot_id="${1:-}"
+    [[ -n "$snapshot_id" ]] || die "Usage: $0 snapshot-rm <snapshot_id>"
+    api_request_with_status DELETE "/api/snapshots/$snapshot_id"
+    if [[ "$API_STATUS" == "204" ]]; then
+        log_success "Snapshot deleted: $snapshot_id"
+        return 0
+    fi
+    [[ "$API_STATUS" == "200" ]] || die "Expected HTTP 204 (or 200) for snapshot delete, got $API_STATUS"
+    echo "$API_RESPONSE" | pretty_json
+}
+
+cmd_snapshot_pin() {
+    local snapshot_id="${1:-}"
+    [[ -n "$snapshot_id" ]] || die "Usage: $0 snapshot-pin <snapshot_id>"
+    api_request POST "/api/snapshots/$snapshot_id/pin" "{}" | pretty_json
+}
+
+cmd_snapshot_unpin() {
+    local snapshot_id="${1:-}"
+    [[ -n "$snapshot_id" ]] || die "Usage: $0 snapshot-unpin <snapshot_id>"
+    api_request POST "/api/snapshots/$snapshot_id/unpin" "{}" | pretty_json
+}
+
 cmd_op_status() {
     local operation_id="${1:-}"
     [[ -n "$operation_id" ]] || die "Usage: $0 op-status <operation_id>"
@@ -789,6 +1023,37 @@ cmd_job_get() {
 
     log_info "Getting exec job $job_id for container $container_id (include_output=$include_output)..."
     api_request GET "/api/containers/$container_id/jobs/$job_id?include_output=$include_output" | pretty_json
+}
+
+cmd_processes() {
+    local container_id="${1:-}"
+    [[ -n "$container_id" ]] || die "Usage: $0 processes <container_id>"
+    api_request GET "/api/containers/$container_id/processes" | pretty_json
+}
+
+cmd_process_kill() {
+    local container_id="${1:-}"
+    local pid="${2:-}"
+    local signal="${3:-TERM}"
+    [[ -n "$container_id" && -n "$pid" ]] || die "Usage: $0 process-kill <container_id> <pid> [signal]"
+    api_request DELETE "/api/containers/$container_id/processes/$pid?signal=$(url_encode "$signal")" | pretty_json
+}
+
+cmd_cleanup_tasks() {
+    local container_id="${1:-}"
+    [[ -n "$container_id" ]] || die "Usage: $0 cleanup-tasks <container_id>"
+    api_request GET "/api/containers/$container_id/cleanup/tasks" | pretty_json
+}
+
+cmd_cleanup_force() {
+    local container_id="${1:-}"
+    local remove_volumes="${2:-false}"
+    [[ -n "$container_id" ]] || die "Usage: $0 cleanup-force <container_id> [remove_volumes=true|false]"
+    case "$remove_volumes" in
+        true|false) ;;
+        *) die "cleanup-force remove_volumes must be true or false" ;;
+    esac
+    api_request POST "/api/containers/$container_id/cleanup/force" "{\"confirm\":true,\"remove_volumes\":$remove_volumes}" | pretty_json
 }
 
 # =============================================================================
@@ -880,6 +1145,12 @@ cmd_volume_get() {
     api_request GET "/api/volumes/$name" | pretty_json
 }
 
+cmd_volume_inspect() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "Usage: $0 volume-inspect <name>"
+    api_request GET "/api/volumes/$name/inspect" | pretty_json
+}
+
 cmd_volume_delete() {
     local name="${1:-}"
     [[ -n "$name" ]] || die "Usage: $0 volume-delete <name>"
@@ -966,6 +1237,22 @@ cmd_volume_cat() {
     response=$(api_request GET "/api/volumes/$name/files/$p")
 
     echo "$response" | jq -r '.content' | base64 -d
+}
+
+cmd_volume_rm_file() {
+    local name="${1:-}"
+    local remote_path="${2:-}"
+    [[ -n "$name" && -n "$remote_path" ]] || die "Usage: $0 volume-rm-file <volume_name> <remote_path>"
+    local p
+    p=$(trim_leading_slash "$remote_path")
+    api_request DELETE "/api/volumes/$name/files/$p" | pretty_json
+}
+
+cmd_volume_rename() {
+    local name="${1:-}"
+    local new_name="${2:-}"
+    [[ -n "$name" && -n "$new_name" ]] || die "Usage: $0 volume-rename <name> <new_name>"
+    api_request POST "/api/volumes/$name/rename" "{\"new_name\":\"$(json_escape "$new_name")\"}" | pretty_json
 }
 
 # =============================================================================
@@ -1059,6 +1346,69 @@ cmd_network_diag() {
     api_request GET "/api/containers/$container_id/network/diagnostics" | pretty_json
 }
 
+cmd_network_get() {
+    local container_id="${1:-}"
+    [[ -n "$container_id" ]] || die "Usage: $0 network-get <container_id>"
+    api_request GET "/api/containers/$container_id/network" | pretty_json
+}
+
+cmd_network_set() {
+    local container_id="${1:-}"
+    local ip_address="${2:-}"
+    [[ -n "$container_id" ]] || die "Usage: $0 network-set <container_id> <ip_address>"
+    [[ -n "$ip_address" ]] || die "Usage: $0 network-set <container_id> <ip_address>"
+    api_request PUT "/api/containers/$container_id/network" "{\"ip_address\":\"$(json_escape "$ip_address")\"}" | pretty_json
+}
+
+cmd_network_setup() {
+    local container_id="${1:-}"
+    [[ -n "$container_id" ]] || die "Usage: $0 network-setup <container_id>"
+    api_request POST "/api/containers/$container_id/network/setup" "{}" | pretty_json
+}
+
+cmd_egress() {
+    local container_id="${1:-}"
+    [[ -n "$container_id" ]] || die "Usage: $0 egress <container_id>"
+    api_request GET "/api/containers/$container_id/egress" | pretty_json
+}
+
+cmd_route_add() {
+    local container_id="${1:-}"
+    local destination="${2:-}"
+    [[ -n "$container_id" && -n "$destination" ]] || die "Usage: $0 route-add <container_id> <destination_cidr>"
+    api_request POST "/api/containers/$container_id/routes" "{\"destination\":\"$(json_escape "$destination")\"}" | pretty_json
+}
+
+cmd_route_rm() {
+    local container_id="${1:-}"
+    local destination="${2:-}"
+    [[ -n "$container_id" && -n "$destination" ]] || die "Usage: $0 route-rm <container_id> <destination_cidr>"
+    api_request DELETE "/api/containers/$container_id/routes" "{\"destination\":\"$(json_escape "$destination")\"}" | pretty_json
+}
+
+cmd_monitor_profile() {
+    api_request GET "/api/monitors/profile" | pretty_json
+}
+
+cmd_dns_entries() {
+    api_request GET "/api/dns/entries" | pretty_json
+}
+
+cmd_dns_rename() {
+    local current_name="${1:-}"
+    local new_name="${2:-}"
+    [[ -n "$current_name" && -n "$new_name" ]] || die "Usage: $0 dns-rename <current_name> <new_name>"
+    api_request POST "/api/dns/entries/$current_name/rename" "{\"new_name\":\"$(json_escape "$new_name")\"}" | pretty_json
+}
+
+cmd_cleanup_status() {
+    api_request GET "/api/cleanup/status" | pretty_json
+}
+
+cmd_cleanup_tasks_global() {
+    api_request GET "/api/cleanup/tasks" | pretty_json
+}
+
 # =============================================================================
 # ICC (JETS Messaging)
 # =============================================================================
@@ -1080,6 +1430,27 @@ cmd_icc_schema() {
 
 cmd_icc_types() {
     api_request GET "/api/icc/types" | pretty_json
+}
+
+cmd_icc_container_status() {
+    local container_id="${1:-}"
+    [[ -n "$container_id" ]] || die "Usage: $0 icc-container-status <container_id>"
+    api_request GET "/api/containers/$container_id/icc" | pretty_json
+}
+
+cmd_icc_state_version() {
+    local container_id="${1:-}"
+    [[ -n "$container_id" ]] || die "Usage: $0 icc-state-version <container_id>"
+    api_request GET "/api/icc/containers/$container_id/state-version" | pretty_json
+}
+
+cmd_icc_container_publish() {
+    local container_id="${1:-}"
+    local envelope_b64="${2:-}"
+    [[ -n "$container_id" && -n "$envelope_b64" ]] || die "Usage: $0 icc-container-publish <container_id> <envelope_b64>"
+    local payload
+    payload="{\"envelope_b64\":\"$(json_escape "$envelope_b64")\"}"
+    api_request POST "/api/containers/$container_id/icc/publish" "$payload" | pretty_json
 }
 
 cmd_icc_proto() {
@@ -1107,6 +1478,178 @@ cmd_icc_publish_file() {
     envelope_b64="$(tr -d '\r\n' < "$file_path")"
     [[ -n "$envelope_b64" ]] || die "Envelope file is empty: $file_path"
     cmd_icc_publish "$envelope_b64"
+}
+
+cmd_icc_broadcast() {
+    local envelope_b64=""
+    local container_ids=""
+    local include_non_running=""
+    local limit=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --container-ids=*)
+                container_ids="${1#*=}"
+                shift
+                ;;
+            --container-ids)
+                container_ids="${2:-}"
+                [[ -n "$container_ids" ]] || die "icc-broadcast --container-ids requires comma-separated IDs"
+                shift 2
+                ;;
+            --include-non-running)
+                include_non_running=true
+                shift
+                ;;
+            --limit=*)
+                limit="${1#*=}"
+                [[ "$limit" =~ ^[0-9]+$ ]] || die "icc-broadcast --limit must be an integer"
+                shift
+                ;;
+            --limit)
+                limit="${2:-}"
+                [[ "$limit" =~ ^[0-9]+$ ]] || die "icc-broadcast --limit must be an integer"
+                shift 2
+                ;;
+            *)
+                if [[ -z "$envelope_b64" ]]; then
+                    envelope_b64="$1"
+                    shift
+                else
+                    die "Usage: $0 icc-broadcast <envelope_b64> [--container-ids=a,b] [--include-non-running] [--limit=N]"
+                fi
+                ;;
+        esac
+    done
+
+    [[ -n "$envelope_b64" ]] || die "Usage: $0 icc-broadcast <envelope_b64> [--container-ids=a,b] [--include-non-running] [--limit=N]"
+
+    local targets_json=""
+    if [[ -n "$container_ids" ]]; then
+        local ids_json="" id
+        IFS=',' read -r -a _ids <<< "$container_ids"
+        for id in "${_ids[@]}"; do
+            [[ -z "$id" ]] && continue
+            [[ -n "$ids_json" ]] && ids_json="$ids_json,"
+            ids_json="$ids_json\"$(json_escape "$id")\""
+        done
+        [[ -n "$ids_json" ]] || die "icc-broadcast --container-ids was empty after parsing"
+        targets_json="{\"container_ids\":[${ids_json}]"
+    fi
+    if [[ -n "$include_non_running" ]]; then
+        if [[ -z "$targets_json" ]]; then
+            targets_json="{"
+        else
+            targets_json="${targets_json},"
+        fi
+        targets_json="${targets_json}\"include_non_running\":true"
+    fi
+    if [[ -n "$limit" ]]; then
+        if [[ -z "$targets_json" ]]; then
+            targets_json="{"
+        else
+            targets_json="${targets_json},"
+        fi
+        targets_json="${targets_json}\"limit\":$limit"
+    fi
+    if [[ -n "$targets_json" ]]; then
+        targets_json="${targets_json}}"
+    fi
+
+    local payload
+    payload="{\"envelope_b64\":\"$(json_escape "$envelope_b64")\""
+    if [[ -n "$targets_json" ]]; then
+        payload="$payload,\"targets\":$targets_json"
+    fi
+    payload="$payload}"
+
+    api_request POST "/api/icc/messages/broadcast" "$payload" | pretty_json
+}
+
+cmd_icc_exec_broadcast() {
+    local timeout_ms=""
+    local detach=false
+    local workdir=""
+    local capture_output=true
+    local container_ids=""
+    local include_non_running=""
+    local limit=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --timeout=*) timeout_ms="${1#*=}"; shift ;;
+            --detach) detach=true; shift ;;
+            --workdir=*) workdir="${1#*=}"; shift ;;
+            --no-capture) capture_output=false; shift ;;
+            --container-ids=*) container_ids="${1#*=}"; shift ;;
+            --container-ids)
+                container_ids="${2:-}"
+                [[ -n "$container_ids" ]] || die "icc-exec-broadcast --container-ids requires comma-separated IDs"
+                shift 2
+                ;;
+            --include-non-running) include_non_running=true; shift ;;
+            --limit=*)
+                limit="${1#*=}"
+                [[ "$limit" =~ ^[0-9]+$ ]] || die "icc-exec-broadcast --limit must be an integer"
+                shift
+                ;;
+            --limit)
+                limit="${2:-}"
+                [[ "$limit" =~ ^[0-9]+$ ]] || die "icc-exec-broadcast --limit must be an integer"
+                shift 2
+                ;;
+            --) shift; break ;;
+            *) break ;;
+        esac
+    done
+
+    local command="$*"
+    [[ -n "$command" ]] || die "Usage: $0 icc-exec-broadcast [target opts] [exec opts] -- <command>"
+
+    local payload targets_json
+    payload="{\"command\":\"$(json_escape "$command")\",\"capture_output\":$capture_output,\"detach\":$detach"
+    if [[ -n "$workdir" ]]; then
+        payload="$payload,\"workdir\":\"$(json_escape "$workdir")\""
+    fi
+    if [[ -n "$timeout_ms" ]]; then
+        payload="$payload,\"timeout_ms\":$timeout_ms"
+    fi
+
+    targets_json=""
+    if [[ -n "$container_ids" ]]; then
+        local ids_json="" id
+        IFS=',' read -r -a _ids <<< "$container_ids"
+        for id in "${_ids[@]}"; do
+            [[ -z "$id" ]] && continue
+            [[ -n "$ids_json" ]] && ids_json="$ids_json,"
+            ids_json="$ids_json\"$(json_escape "$id")\""
+        done
+        [[ -n "$ids_json" ]] || die "icc-exec-broadcast --container-ids was empty after parsing"
+        targets_json="{\"container_ids\":[${ids_json}]"
+    fi
+    if [[ -n "$include_non_running" ]]; then
+        if [[ -z "$targets_json" ]]; then
+            targets_json="{"
+        else
+            targets_json="${targets_json},"
+        fi
+        targets_json="${targets_json}\"include_non_running\":true"
+    fi
+    if [[ -n "$limit" ]]; then
+        if [[ -z "$targets_json" ]]; then
+            targets_json="{"
+        else
+            targets_json="${targets_json},"
+        fi
+        targets_json="${targets_json}\"limit\":$limit"
+    fi
+    if [[ -n "$targets_json" ]]; then
+        targets_json="${targets_json}}"
+        payload="$payload,\"targets\":$targets_json"
+    fi
+
+    payload="$payload}"
+    api_request POST "/api/icc/exec/broadcast" "$payload" | pretty_json
 }
 
 cmd_icc_messages() {
@@ -1212,243 +1755,152 @@ cmd_icc_dlq_replay() {
 }
 
 # =============================================================================
-# Terminal Sessions
+# OCI Image Management
 # =============================================================================
-get_auth_value_for_ws_query() {
-    case "$QUILT_AUTH_MODE" in
-        token)
-            [[ -n "$QUILT_TOKEN" ]] || die "QUILT_AUTH_MODE=token but QUILT_TOKEN is empty"
-            printf '%s' "$QUILT_TOKEN"
-            ;;
-        api-key)
-            [[ -n "$QUILT_API_KEY" ]] || die "QUILT_AUTH_MODE=api-key but QUILT_API_KEY is empty"
-            printf '%s' "$QUILT_API_KEY"
-            ;;
-        auto)
-            if [[ -n "$QUILT_API_KEY" ]]; then
-                printf '%s' "$QUILT_API_KEY"
-            elif [[ -n "$QUILT_TOKEN" ]]; then
-                printf '%s' "$QUILT_TOKEN"
-            else
-                die "No authentication configured. Set QUILT_API_KEY or QUILT_TOKEN."
-            fi
-            ;;
-        *)
-            die "Invalid QUILT_AUTH_MODE='$QUILT_AUTH_MODE' (expected: auto|token|api-key)"
-            ;;
-    esac
-}
-
-ws_url_with_token() {
-    local base_url="$1"
-    local token="$2"
-    local sep='?'
-
-    [[ -n "$base_url" ]] || die "ws_url_with_token requires base URL"
-    [[ -n "$token" ]] || { printf '%s' "$base_url"; return 0; }
-
-    if [[ "$base_url" == *"token="* ]]; then
-        printf '%s' "$base_url"
-        return 0
-    fi
-
-    [[ "$base_url" == *\?* ]] && sep='&'
-    printf '%s%s%s' "$base_url" "$sep" "token=$(url_encode "$token")"
-}
-
-attach_terminal_node() {
-    local ws_url="$1"
-    local cols="${2:-120}"
-    local rows="${3:-30}"
-    [[ -n "$ws_url" ]] || die "attach_terminal_node requires websocket URL"
-    have_cmd node || die "Interactive terminal attach requires node (for websocket streaming)."
-
-    local node_script
-    node_script=$(mktemp "${TMPDIR:-/tmp}/quilt-terminal-attach.XXXXXX") || die "Failed to create temporary node script file"
-
-    cat >"$node_script" <<'NODEEOF'
-const url = process.argv[2];
-const initCols = Number(process.argv[3] || 120);
-const initRows = Number(process.argv[4] || 30);
-const WebSocketCtor = globalThis.WebSocket;
-
-if (!WebSocketCtor) {
-  console.error("[ERROR] Node runtime does not expose WebSocket.");
-  process.exit(2);
-}
-
-let ttyConfigured = false;
-let remoteExitCode = 0;
-let closed = false;
-
-function restoreTty() {
-  if (ttyConfigured && process.stdin.isTTY) {
-    try { process.stdin.setRawMode(false); } catch (_) {}
-  }
-}
-
-function sendJson(ws, obj) {
-  if (ws.readyState !== WebSocketCtor.OPEN) return;
-  ws.send(JSON.stringify(obj));
-}
-
-const ws = new WebSocketCtor(url, "terminal");
-ws.binaryType = "arraybuffer";
-
-ws.onopen = () => {
-  if (ws.protocol !== "terminal") {
-    process.stderr.write(`[ERROR] WebSocket subprotocol mismatch. expected=terminal got=${ws.protocol || "<empty>"}\n`);
-    ws.close();
-    return;
-  }
-
-  const cols = process.stdout.columns || initCols;
-  const rows = process.stdout.rows || initRows;
-  ws.send(JSON.stringify({ type: "resize", cols, rows }));
-
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
-    ttyConfigured = true;
-  }
-
-  process.stdin.resume();
-  process.stdin.on("data", (chunk) => {
-    if (ws.readyState !== WebSocketCtor.OPEN) return;
-    ws.send(chunk);
-  });
-};
-
-const pingInterval = setInterval(() => {
-  if (ws.readyState !== WebSocketCtor.OPEN) return;
-  ws.send(JSON.stringify({ type: "ping", ts: Date.now() }));
-}, 25000);
-
-ws.onmessage = (evt) => {
-  if (typeof evt.data !== "string") {
-    const buf = Buffer.isBuffer(evt.data) ? evt.data : Buffer.from(evt.data);
-    process.stdout.write(buf);
-    return;
-  }
-
-  const raw = evt.data;
-  let msg;
-  try {
-    msg = JSON.parse(raw);
-  } catch (_) {
-    process.stderr.write("[ERROR] Received non-JSON text frame from server.\n");
-    ws.close();
-    return;
-  }
-
-  switch (msg.type) {
-    case "ready":
-      break;
-    case "pong":
-      break;
-    case "exit":
-      remoteExitCode = Number(msg.code || 0);
-      ws.close();
-      break;
-    case "error":
-      process.stderr.write(`[ERROR] Terminal: ${msg.code || "UNKNOWN"} ${msg.message || ""}\n`);
-      ws.close();
-      break;
-    case "output":
-      if (typeof msg.data === "string") process.stdout.write(msg.data);
-      break;
-    default:
-      break;
-  }
-};
-
-ws.onerror = () => {
-  process.stderr.write("[ERROR] WebSocket attach failed.\n");
-};
-
-ws.onclose = () => {
-  clearInterval(pingInterval);
-  if (closed) return;
-  closed = true;
-  restoreTty();
-  process.exit(Number.isFinite(remoteExitCode) ? remoteExitCode : 0);
-};
-
-process.on("SIGWINCH", () => {
-  const cols = process.stdout.columns || initCols;
-  const rows = process.stdout.rows || initRows;
-  if (ws.readyState !== WebSocketCtor.OPEN) return;
-  ws.send(JSON.stringify({ type: "resize", cols, rows }));
-});
-
-process.on("SIGINT", () => {
-  if (ws.readyState !== WebSocketCtor.OPEN) return;
-  ws.send(JSON.stringify({ type: "signal", signal: "SIGINT" }));
-});
-
-process.on("exit", () => {
-  clearInterval(pingInterval);
-  restoreTty();
-});
-NODEEOF
-
-    node "$node_script" "$ws_url" "$cols" "$rows"
-    local rc=$?
-    rm -f "$node_script"
-    return "$rc"
-}
-
-cmd_shell() {
-    local container_id="${1:-}"
-    shift || true
-    [[ -n "$container_id" ]] || die "Usage: $0 shell <container_id> [--cols=<n>] [--rows=<n>] [--shell=<abs-path>]"
-
-    local cols=120
-    local rows=30
-    local shell_path="/bin/bash"
+cmd_oci_pull() {
+    local reference=""
+    local force=false
+    local platform=""
+    local username=""
+    local password=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --cols=*) cols="${1#*=}"; shift ;;
-            --rows=*) rows="${1#*=}"; shift ;;
-            --shell=*) shell_path="${1#*=}"; shift ;;
+            --force) force=true; shift ;;
+            --platform=*) platform="${1#*=}"; shift ;;
+            --platform)
+                platform="${2:-}"
+                [[ -n "$platform" ]] || die "oci-pull --platform requires a value"
+                shift 2
+                ;;
+            --username=*) username="${1#*=}"; shift ;;
+            --username)
+                username="${2:-}"
+                [[ -n "$username" ]] || die "oci-pull --username requires a value"
+                shift 2
+                ;;
+            --password=*) password="${1#*=}"; shift ;;
+            --password)
+                password="${2:-}"
+                [[ -n "$password" ]] || die "oci-pull --password requires a value"
+                shift 2
+                ;;
             *)
-                die "Usage: $0 shell <container_id> [--cols=<n>] [--rows=<n>] [--shell=<abs-path>]"
+                if [[ -z "$reference" ]]; then
+                    reference="$1"
+                    shift
+                else
+                    die "Usage: $0 oci-pull <reference> [--force] [--platform=linux/amd64] [--username=<u>] [--password=<p>]"
+                fi
                 ;;
         esac
     done
 
-    [[ "$shell_path" == /* ]] || die "--shell must be an absolute path (example: /bin/bash)"
-    [[ "$shell_path" != *[[:space:]]* ]] || die "--shell must not include whitespace/args"
+    [[ -n "$reference" ]] || die "Usage: $0 oci-pull <reference> [--force] [--platform=linux/amd64] [--username=<u>] [--password=<p>]"
+
+    local payload
+    payload="{\"reference\":\"$(json_escape "$reference")\",\"force\":$force"
+    if [[ -n "$platform" ]]; then
+        payload="$payload,\"platform\":\"$(json_escape "$platform")\""
+    fi
+    if [[ -n "$username" ]]; then
+        payload="$payload,\"registry_username\":\"$(json_escape "$username")\""
+    fi
+    if [[ -n "$password" ]]; then
+        payload="$payload,\"registry_password\":\"$(json_escape "$password")\""
+    fi
+    payload="$payload}"
+
+    api_request POST "/api/oci/images/pull" "$payload" | pretty_json
+}
+
+cmd_oci_list() {
+    local filter=""
+    local include_digests=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --filter=*) filter="${1#*=}"; shift ;;
+            --filter)
+                filter="${2:-}"
+                [[ -n "$filter" ]] || die "oci-list --filter requires a value"
+                shift 2
+                ;;
+            --include-digests) include_digests=true; shift ;;
+            *)
+                die "Usage: $0 oci-list [--filter=<text>] [--include-digests]"
+                ;;
+        esac
+    done
+
+    local qs=""
+    [[ -n "$filter" ]] && qs="${qs}${qs:+&}filter=$(url_encode "$filter")"
+    if [[ "$include_digests" == "true" ]]; then
+        qs="${qs}${qs:+&}include_digests=true"
+    fi
+    local endpoint="/api/oci/images"
+    [[ -n "$qs" ]] && endpoint="${endpoint}?${qs}"
+    api_request GET "$endpoint" | pretty_json
+}
+
+cmd_oci_inspect() {
+    local reference="${1:-}"
+    [[ -n "$reference" ]] || die "Usage: $0 oci-inspect <reference>"
+    api_request GET "/api/oci/images/inspect?reference=$(url_encode "$reference")" | pretty_json
+}
+
+cmd_oci_history() {
+    local reference="${1:-}"
+    [[ -n "$reference" ]] || die "Usage: $0 oci-history <reference>"
+    api_request GET "/api/oci/images/history?reference=$(url_encode "$reference")" | pretty_json
+}
+
+cmd_oci_rm() {
+    local reference="${1:-}"
+    shift || true
+    [[ -n "$reference" ]] || die "Usage: $0 oci-rm <reference> [--prune-layers]"
+
+    local prune_layers=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --prune-layers) prune_layers=true; shift ;;
+            *) die "Usage: $0 oci-rm <reference> [--prune-layers]" ;;
+        esac
+    done
+
+    api_request DELETE "/api/oci/images?reference=$(url_encode "$reference")&prune_layers=$prune_layers" | pretty_json
+}
+
+# =============================================================================
+# Terminal Sessions
+# =============================================================================
+cmd_shell() {
+    local container_id="${1:-}"
+    [[ -n "$container_id" ]] || die "Usage: $0 shell <container_id>"
 
     log_info "Creating terminal session for container $container_id..."
 
     local payload
-    payload="{\"target\":\"container\",\"container_id\":\"$(json_escape "$container_id")\",\"cols\":$cols,\"rows\":$rows,\"shell\":\"$(json_escape "$shell_path")\"}"
+    payload="{\"target\":\"container\",\"container_id\":\"$(json_escape "$container_id")\",\"cols\":120,\"rows\":30,\"shell\":\"/bin/bash\"}"
 
     local session
     session=$(api_request POST "/api/terminal/sessions" "$payload")
 
-    local session_id protocol_version attach_url
+    local session_id attach_url
     session_id=$(echo "$session" | json_get_string_best_effort "session_id")
-    protocol_version=$(echo "$session" | json_get_string_best_effort "protocol_version")
     attach_url=$(echo "$session" | json_get_string_best_effort "attach_url")
 
     if [[ -n "$session_id" ]]; then
         log_success "Terminal session created: $session_id"
     fi
 
-    [[ "$protocol_version" == "terminal" ]] || die "Expected protocol_version=terminal, got '${protocol_version:-<empty>}'"
-    [[ -n "$attach_url" ]] || die "Terminal session created but attach_url was missing."
+    if [[ -n "$attach_url" ]]; then
+        log_info "Attach URL: $attach_url"
+    else
+        log_warn "No attach_url in response."
+    fi
 
-    local auth_value ws_attach_url
-    log_info "Attach URL: $attach_url"
-
-    auth_value=$(get_auth_value_for_ws_query)
-    ws_attach_url=$(ws_url_with_token "$attach_url" "$auth_value")
-    [[ "$ws_attach_url" == *"token="* ]] || die "WS attach URL is missing token query parameter."
-    log_info "Attaching to terminal session $session_id..."
-    attach_terminal_node "$ws_attach_url" "$cols" "$rows"
-    return $?
+    echo "$session" | pretty_json
 }
 
 # =============================================================================
@@ -1480,12 +1932,23 @@ GUI WORKLOADS (QGUI):
 SYSTEM:
     health                       Check API health (no auth required)
     system                       Get system info
+    raw <METHOD> <endpoint> [json]
+                                 Raw authenticated API request escape hatch
 
 CONTAINERS:
     list [state]                 List containers (state filter is strict server-side validation)
     get <id>                     Get container details
-    create <name> [cmd...]
+    get-by-name <name>           Resolve container ID by name
+    create <name> [opts] [-- cmd...]
                                  Create a container (operation-driven)
+                                 opts:
+                                   --image=<value>   Alias, registry ref, or local Dockerfile path
+                                   --oci             Enable OCI image mode
+                                   --workdir=<path>  Container working directory
+                                   --env K=V         Repeatable
+                                   --memory-mb=<int>
+                                   --cpu=<percent>
+                                   --strict|--no-strict
     create-batch --file <batch.json>
                                  Batch create containers
     rename <id> <new_name>       Rename a container
@@ -1500,6 +1963,14 @@ CONTAINERS:
                                  Fork a container
     clone <snapshot_id> [name]
                                  Clone snapshot into a new container
+    snapshot <id>                Create a Loom snapshot for container
+    snapshots [container_id]     List snapshots (optional container filter)
+    snapshot-get <snapshot_id>   Get snapshot details
+    snapshot-lineage <snapshot_id>
+                                 Get snapshot lineage chain
+    snapshot-pin <snapshot_id>   Pin snapshot
+    snapshot-unpin <snapshot_id> Unpin snapshot
+    snapshot-rm <snapshot_id>    Delete snapshot
 
     exec <id> [opts] <cmd>       Execute command in container
                                  opts:
@@ -1518,12 +1989,14 @@ CONTAINERS:
 
     jobs <id>                    List exec jobs (detach mode)
     job-get <id> <job_id> [bool] Get exec job details (include_output default true)
+    processes <id>               List running processes in container
+    process-kill <id> <pid> [signal]
+                                 Kill one process in container
 
-    shell <id> [opts]            Open interactive terminal (create + attach)
-                                 opts:
-                                   --cols=<n>       Initial terminal columns (default 120)
-                                   --rows=<n>       Initial terminal rows (default 30)
-                                   --shell=<path>   Absolute shell path, no args (default /bin/bash)
+    shell <id>                   Create terminal session (returns session JSON with attach_url)
+    gui-url <id>                 Get signed GUI URL for container
+    cleanup-tasks <id>           List container cleanup tasks
+    cleanup-force <id> [bool]    Force cleanup (confirm=true; optional remove_volumes)
 
 OPERATIONS:
     op-status <operation_id>     Get operation status
@@ -1547,6 +2020,7 @@ VOLUMES:
     volumes                      List volumes
     volume-create <name> [labels_json]
     volume-get <name>
+    volume-inspect <name>
     volume-delete <name>
     volume-ls <name> [path]
     volume-upload <name> <archive.tgz> [target] [strip]
@@ -1555,12 +2029,27 @@ VOLUMES:
                                  Upload single file to volume
     volume-cat <name> <remote>
                                  Download/display file (requires jq to decode)
+    volume-rm-file <name> <remote>
+                                 Delete one file from volume
+    volume-rename <name> <new_name>
+                                 Rename volume
 
 NETWORK & MONITORING:
     network                      Get network allocations
+    network-get <id>             Get container network config
+    network-set <id> <ip>        Update container IP
+    network-setup <id>           Re-run/confirm network setup
     network-diag <id>            Container network diagnostics
+    route-add <id> <cidr>        Add route in container netns
+    route-rm <id> <cidr>         Remove route in container netns
+    egress <id>                  Container egress usage snapshot
     monitors                     List monitoring processes
+    monitor-profile              Get monitor profile summary
     activity [limit]             Activity feed (default 50)
+    dns-entries                  List DNS entries
+    dns-rename <old> <new>       Rename DNS entry
+    cleanup-status               Global cleanup status
+    cleanup-tasks-global         Global cleanup task list
 
 ICC (JETS):
     icc                          ICC API root info
@@ -1568,10 +2057,26 @@ ICC (JETS):
     icc-streams                  ICC stream/subject conventions
     icc-schema                   ICC publish schema summary
     icc-types                    ICC enums and message states
+    icc-container-status <id>    Container-scoped ICC health/status
+    icc-state-version <id>       Get ICC state version for container
     icc-proto                    Raw jets.proto source
     icc-descriptor               Protobuf descriptor (base64)
     icc-publish <envelope_b64>   Publish protobuf envelope (base64)
     icc-publish-file <file>      Publish envelope from file contents
+    icc-container-publish <id> <envelope_b64>
+                                 Publish with container-scoped route
+    icc-broadcast <envelope_b64> [--container-ids=a,b] [--include-non-running] [--limit=N]
+                                 Broadcast one message to many containers
+    icc-exec-broadcast [opts] -- <command>
+                                 Broadcast exec across many containers
+                                 opts:
+                                   --container-ids=a,b
+                                   --include-non-running
+                                   --limit=<n>
+                                   --timeout=<ms>
+                                   --detach
+                                   --workdir=<path>
+                                   --no-capture
     icc-messages <container_id> [from_seq] [to_seq] [state] [limit]
                                  Tenant inbox read path
     icc-inbox <container_id> [from_seq] [to_seq] [state] [limit]
@@ -1582,6 +2087,20 @@ ICC (JETS):
                                  Replay container inbox
     icc-dlq [from_seq] [limit]   List dead-letter messages
     icc-dlq-replay <seq> [to]    Replay DLQ message (optional target override)
+
+OCI IMAGES:
+    oci-pull <ref> [opts]        Pull OCI image from registry
+                                 opts:
+                                   --force
+                                   --platform=<os/arch>
+                                   --username=<registry_user>
+                                   --password=<registry_password>
+    oci-list [--filter=<text>] [--include-digests]
+                                 List pulled OCI images for tenant
+    oci-inspect <reference>      Inspect OCI image metadata/config/manifest
+    oci-history <reference>      Show OCI image layer history
+    oci-rm <reference> [--prune-layers]
+                                 Remove OCI image reference metadata
 
 ENVIRONMENT VARIABLES:
     QUILT_API_URL                Base URL (default https://backend.quilt.sh)
@@ -1602,10 +2121,12 @@ main() {
         # System
         health)         cmd_health "$@" ;;
         system)         cmd_system "$@" ;;
+        raw)            cmd_raw "$@" ;;
 
         # Containers
         list|ls)        cmd_list "$@" ;;
         get)            cmd_get "$@" ;;
+        get-by-name)    cmd_get_by_name "$@" ;;
         create)         cmd_create "$@" ;;
         create-batch)   cmd_create_batch "$@" ;;
         rename)         cmd_rename "$@" ;;
@@ -1619,11 +2140,23 @@ main() {
         rm|delete)      cmd_rm "$@" ;;
         fork)           cmd_fork "$@" ;;
         clone)          cmd_clone "$@" ;;
+        snapshot)       cmd_snapshot "$@" ;;
+        snapshots)      cmd_snapshots "$@" ;;
+        snapshot-get)   cmd_snapshot_get "$@" ;;
+        snapshot-lineage) cmd_snapshot_lineage "$@" ;;
+        snapshot-pin)   cmd_snapshot_pin "$@" ;;
+        snapshot-unpin) cmd_snapshot_unpin "$@" ;;
+        snapshot-rm)    cmd_snapshot_rm "$@" ;;
         restart)        cmd_restart "$@" ;;
         metrics)        cmd_metrics "$@" ;;
         ready)          cmd_ready "$@" ;;
         jobs)           cmd_jobs "$@" ;;
         job-get)        cmd_job_get "$@" ;;
+        processes)      cmd_processes "$@" ;;
+        process-kill)   cmd_process_kill "$@" ;;
+        cleanup-tasks)  cmd_cleanup_tasks "$@" ;;
+        cleanup-force)  cmd_cleanup_force "$@" ;;
+        gui-url)        cmd_gui_url "$@" ;;
         op-status)      cmd_op_status "$@" ;;
         op-wait)        cmd_op_wait "$@" ;;
 
@@ -1640,17 +2173,31 @@ main() {
         volumes)        cmd_volumes "$@" ;;
         volume-create)  cmd_volume_create "$@" ;;
         volume-get)     cmd_volume_get "$@" ;;
+        volume-inspect) cmd_volume_inspect "$@" ;;
         volume-delete)  cmd_volume_delete "$@" ;;
         volume-ls)      cmd_volume_ls "$@" ;;
         volume-upload)  cmd_volume_upload "$@" ;;
         volume-put)     cmd_volume_put "$@" ;;
         volume-cat)     cmd_volume_cat "$@" ;;
+        volume-rm-file) cmd_volume_rm_file "$@" ;;
+        volume-rename)  cmd_volume_rename "$@" ;;
 
         # Network & monitoring
         network)        cmd_network "$@" ;;
+        network-get)    cmd_network_get "$@" ;;
+        network-set)    cmd_network_set "$@" ;;
+        network-setup)  cmd_network_setup "$@" ;;
         network-diag)   cmd_network_diag "$@" ;;
+        route-add)      cmd_route_add "$@" ;;
+        route-rm)       cmd_route_rm "$@" ;;
+        egress)         cmd_egress "$@" ;;
         monitors)       cmd_monitors "$@" ;;
+        monitor-profile) cmd_monitor_profile "$@" ;;
         activity)       cmd_activity "$@" ;;
+        dns-entries)    cmd_dns_entries "$@" ;;
+        dns-rename)     cmd_dns_rename "$@" ;;
+        cleanup-status) cmd_cleanup_status "$@" ;;
+        cleanup-tasks-global) cmd_cleanup_tasks_global "$@" ;;
 
         # ICC
         icc)            cmd_icc "$@" ;;
@@ -1658,16 +2205,28 @@ main() {
         icc-streams)    cmd_icc_streams "$@" ;;
         icc-schema)     cmd_icc_schema "$@" ;;
         icc-types)      cmd_icc_types "$@" ;;
+        icc-container-status) cmd_icc_container_status "$@" ;;
+        icc-state-version) cmd_icc_state_version "$@" ;;
         icc-proto)      cmd_icc_proto "$@" ;;
         icc-descriptor) cmd_icc_descriptor "$@" ;;
         icc-publish)    cmd_icc_publish "$@" ;;
         icc-publish-file) cmd_icc_publish_file "$@" ;;
+        icc-container-publish) cmd_icc_container_publish "$@" ;;
+        icc-broadcast)  cmd_icc_broadcast "$@" ;;
+        icc-exec-broadcast|icc-exec-all) cmd_icc_exec_broadcast "$@" ;;
         icc-messages)   cmd_icc_messages "$@" ;;
         icc-inbox)      cmd_icc_inbox "$@" ;;
         icc-ack)        cmd_icc_ack "$@" ;;
         icc-replay)     cmd_icc_replay "$@" ;;
         icc-dlq)        cmd_icc_dlq "$@" ;;
         icc-dlq-replay) cmd_icc_dlq_replay "$@" ;;
+
+        # OCI images
+        oci-pull)       cmd_oci_pull "$@" ;;
+        oci-list)       cmd_oci_list "$@" ;;
+        oci-inspect)    cmd_oci_inspect "$@" ;;
+        oci-history)    cmd_oci_history "$@" ;;
+        oci-rm)         cmd_oci_rm "$@" ;;
 
         # Terminal
         shell)          cmd_shell "$@" ;;

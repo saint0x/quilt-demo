@@ -17,6 +17,61 @@ Use this guide when working with:
 
 Do not use this guide for cluster orchestration semantics such as workloads, replicas, placements, or node scheduling. Those belong to a separate control plane.
 
+When the task is about that control plane, use `quiltc`. It is Quilt's Kubernetes-like CLI for clusters, nodes, workloads, placements, join tokens, agent reporting, and backend-driven Kubernetes manifest workflows.
+
+## `quiltc` Control Plane
+
+Use `quiltc` when the job is not "operate on one runtime object directly" but instead:
+
+- create or inspect clusters
+- mint join tokens
+- register, heartbeat, drain, or delete nodes
+- create, update, or delete workloads
+- reconcile placements across nodes
+- follow long-running control-plane operations
+- apply or diff Kubernetes manifests against Quilt backend `k8s` endpoints
+
+Core mental model:
+
+- cluster = desired-state control plane
+- node = agent-managed host participating in a cluster
+- workload = desired replicated application spec
+- placement = scheduler assignment of a workload replica onto a node
+
+Important `quiltc` auth inputs:
+
+- `QUILT_BASE_URL`
+- `QUILT_API_KEY`
+- `QUILT_JWT`
+- `QUILT_JOIN_TOKEN` for node registration
+
+Common `quiltc` flows:
+
+```bash
+# Cluster lifecycle
+quiltc clusters create --name demo --pod-cidr 10.70.0.0/16 --node-cidr-prefix 24
+quiltc clusters list
+quiltc clusters get <cluster_id>
+
+# Node enrollment
+quiltc clusters join-token-create <cluster_id> --ttl-secs 600 --max-uses 1
+quiltc agent register <cluster_id> --join-token <join_token> --name node-a
+quiltc agent heartbeat <cluster_id> <node_id> --state ready
+
+# Desired-state scheduling
+quiltc clusters workload-create <cluster_id> '{"name":"demo","replicas":3,"command":["sh","-lc","echo hi; tail -f /dev/null"],"memory_limit_mb":128}'
+quiltc clusters reconcile <cluster_id>
+quiltc clusters placements <cluster_id>
+
+# Backend-driven Kubernetes workflows
+quiltc k8s validate -f ./manifests --namespace default
+quiltc k8s apply -f ./manifests --cluster-id <cluster_id> --follow
+quiltc k8s diff -f ./manifests --cluster-id <cluster_id>
+quiltc k8s status --operation <operation_id> --cluster-id <cluster_id> --follow
+```
+
+Agent rule: if the user is asking for cluster behavior, node behavior, workload replicas, or Kubernetes-like apply/reconcile flows, switch from the direct runtime API model in this file to `quiltc`.
+
 ## Authentication
 
 Most API routes require one of these headers:
@@ -484,3 +539,4 @@ Agent rule: use ICC when multiple containers need direct local comms with a real
 - If state must persist across container replacement, use volumes.
 - If state must be reproducible, snapshot first and clone from that snapshot.
 - If diagnosing connectivity, inspect container network diagnostics before changing routes or IP assignments.
+- If the task is about clusters, nodes, workloads, placements, join tokens, or Kubernetes manifests, use `quiltc` instead of treating it like a direct runtime call.
