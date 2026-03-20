@@ -1,6 +1,6 @@
 # Quilt Platform Agent Guide
 
-This file is the standalone agent guide for the Quilt platform. Treat it as the operational reference for the platform surfaces as a whole: direct runtime usage through `quilt.sh`, orchestration usage through `quiltc`, and the underlying API contracts they map onto.
+This file is the standalone agent guide for the Quilt platform. Treat it as the operational reference for the platform resources, API contracts, orchestration flows, and the agent-facing operating model.
 
 ## Scope
 
@@ -483,63 +483,6 @@ Agent rule: use ICC when multiple containers need direct local comms with a real
 
 The Quilt platform includes both the direct runtime shell client and the control-plane CLI. They live in the same platform guide and should be used together as needed.
 
-### `quilt.sh` Runtime CLI
-
-`quilt.sh` is the direct runtime shell client for Quilt.
-
-Use `quilt.sh` for:
-
-- health and system checks
-- container lifecycle
-- exec, logs, metrics, and shell access
-- snapshots, forks, clones, and operation waiting
-- volumes and file transfer
-- network diagnostics
-- GUI URL access
-- ICC-related runtime tasks
-
-Common `quilt.sh` flows:
-
-```bash
-# Health and discovery
-./quilt.sh health
-./quilt.sh system
-./quilt.sh list
-./quilt.sh get <container_id>
-./quilt.sh get-by-name <container_name>
-
-# Container lifecycle
-./quilt.sh create demo
-./quilt.sh create demo --image prod-gui
-./quilt.sh ready <container_id>
-./quilt.sh start <container_id>
-./quilt.sh stop <container_id>
-./quilt.sh resume <container_id>
-./quilt.sh rm <container_id>
-
-# Exec and runtime inspection
-./quilt.sh exec <container_id> "pwd"
-./quilt.sh exec <container_id> --workdir=/app "npm test"
-./quilt.sh logs <container_id> 100
-./quilt.sh metrics <container_id>
-./quilt.sh jobs <container_id>
-
-# Files, volumes, and snapshots
-./quilt.sh sync <container_id> ./local-dir /app
-./quilt.sh volume-create demo-data
-./quilt.sh volume-put demo-data ./local.txt /remote.txt
-./quilt.sh snapshot <container_id>
-./quilt.sh snapshots
-./quilt.sh clone <snapshot_id> demo-clone
-
-# Diagnostics and async state
-./quilt.sh network
-./quilt.sh network-diag <container_id>
-./quilt.sh activity 50
-./quilt.sh op-status <operation_id>
-./quilt.sh op-wait <operation_id> --timeout-ms=300000
-```
-
 ### `quiltc` Control Plane CLI
 
 `quiltc` is the control-plane CLI for Quilt.
@@ -604,5 +547,4 @@ quiltc k8s status --operation <operation_id> --cluster-id <cluster_id> --follow
 - If state must persist across container replacement, use volumes.
 - If state must be reproducible, snapshot first and clone from that snapshot.
 - If diagnosing connectivity, inspect container network diagnostics before changing routes or IP assignments.
-- If the task is about direct runtime resources, use the `quilt.sh` patterns and runtime contract in this guide.
 - If the task is about clusters, nodes, workloads, placements, join tokens, or Kubernetes manifests, use the `quiltc` patterns in this guide.
