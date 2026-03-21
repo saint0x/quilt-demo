@@ -572,3 +572,104 @@ quiltc k8s status --operation <operation_id> --cluster-id <cluster_id> --follow
 - If state must be reproducible, snapshot first and clone from that snapshot.
 - If diagnosing connectivity, inspect container network diagnostics before changing routes or IP assignments.
 - If the task is about clusters, nodes, workloads, placements, join tokens, or Kubernetes manifests, use the `quiltc` patterns in this guide.
+
+## Serverless Functions
+
+Primary routes:
+
+```text
+POST /api/functions
+GET  /api/functions
+GET  /api/functions/<function_id>
+GET  /api/functions/by-name/<name>
+PUT  /api/functions/<function_id>
+DELETE /api/functions/<function_id>
+POST /api/functions/<function_id>/deploy
+POST /api/functions/<function_id>/pause
+POST /api/functions/<function_id>/resume
+POST /api/functions/<function_id>/invoke
+POST /api/functions/invoke/<name>
+GET  /api/functions/<function_id>/invocations?limit=<n>
+GET  /api/functions/<function_id>/invocations/<invocation_id>
+GET  /api/functions/<function_id>/versions
+POST /api/functions/<function_id>/rollback
+GET  /api/functions/<function_id>/pool
+GET  /api/functions/pool/stats
+```
+
+Create request shape:
+
+```json
+{
+  "name": "my-function",
+  "description": "Processes incoming data",
+  "handler": "index.handler",
+  "runtime": "nodejs",
+  "memory_limit_mb": 256,
+  "cpu_limit_percent": 25.0,
+  "timeout_seconds": 30,
+  "environment": {
+    "NODE_ENV": "production"
+  },
+  "min_instances": 0,
+  "max_instances": 5,
+  "cleanup_on_exit": true,
+  "working_directory": "/app"
+}
+```
+
+Invocation request shape:
+
+```json
+{
+  "payload": "{\"key\":\"value\"}",
+  "environment": {
+    "EXTRA_VAR": "value"
+  },
+  "async_invoke": false,
+  "timeout_seconds": 30
+}
+```
+
+Invocation response shape:
+
+```json
+{
+  "invocation_id": "uuid",
+  "function_id": "uuid",
+  "function_name": "my-function",
+  "execution_node_id": "node-a",
+  "status": "completed",
+  "started_at": "2026-02-02T12:00:00Z",
+  "ended_at": "2026-02-02T12:00:01Z",
+  "duration_ms": 1200,
+  "exit_code": 0,
+  "stdout": "Result output",
+  "stderr": "",
+  "cold_start": true
+}
+```
+
+Pool status shape:
+
+```json
+{
+  "function_id": "uuid",
+  "warming_count": 1,
+  "ready_count": 2,
+  "busy_count": 1,
+  "total_count": 4
+}
+```
+
+Important semantics:
+
+- create returns a pending function record and starts the versioned lifecycle
+- update creates a new version rather than mutating the active version in place
+- `deploy` warms capacity and `pause` scales the function to zero
+- `resume` makes a paused function eligible for execution again
+- `owner_node_id` is the node responsible for deployment and warm-pool reconciliation
+- `execution_node_id` is the node that actually ran the invocation
+- `cold_start` should be treated as execution metadata, not as an error condition
+
+Agent rule: when diagnosing serverless behavior, inspect function state, recent invocations, and pool status together before changing configuration.
