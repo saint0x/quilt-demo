@@ -505,11 +505,11 @@ Agent rule: use ICC when multiple containers need direct local comms with a real
 
 ## CLI Surfaces
 
-The Quilt platform includes both the direct runtime shell client and the control-plane CLI. They live in the same platform guide and should be used together as needed.
+The Quilt platform uses `quiltc` as the verified HTTP control-plane CLI.
 
 ### `quiltc` Control Plane CLI
 
-`quiltc` is the control-plane CLI for Quilt.
+`quiltc` is Quilt's Kubernetes-like CLI. It drives a desired-state control plane (clusters, nodes, workloads, placements) and a runtime surface (containers, volumes, events) via HTTP.
 
 GitHub: [ariacomputecompany/quiltc](https://github.com/ariacomputecompany/quiltc)
 
@@ -547,7 +547,7 @@ quiltc clusters get <cluster_id>
 
 # Node enrollment
 quiltc clusters join-token-create <cluster_id> --ttl-secs 600 --max-uses 1
-quiltc agent register <cluster_id> --join-token <join_token> --name node-a
+quiltc agent register <cluster_id> --join-token <join_token> --name node-a --public-ip 203.0.113.10 --private-ip 10.0.0.10 --agent-version quiltc-test --labels-json '{}' --taints-json '{}' --bridge-name quilt0 --dns-port 53 --egress-limit-mbit 0
 quiltc agent heartbeat <cluster_id> <node_id> --state ready
 
 # Desired-state scheduling
@@ -555,12 +555,24 @@ quiltc clusters workload-create <cluster_id> '{"name":"demo","replicas":3,"comma
 quiltc clusters reconcile <cluster_id>
 quiltc clusters placements <cluster_id>
 
+# Runtime surface
+quiltc containers create '{"name":"demo","command":["sh","-lc","echo hi; tail -f /dev/null"],"memory_limit_mb":128}'
+quiltc containers exec <container_id> -- sh -lc 'id && ip addr && ip route'
+quiltc operations watch <operation_id> --timeout-secs 300
+
 # Backend-driven Kubernetes workflows
 quiltc k8s validate -f ./manifests --namespace default
-quiltc k8s apply -f ./manifests --cluster-id <cluster_id> --follow
+quiltc k8s apply -f ./manifests --cluster-id <cluster_id> --application default --follow
 quiltc k8s diff -f ./manifests --cluster-id <cluster_id>
 quiltc k8s status --operation <operation_id> --cluster-id <cluster_id> --follow
 ```
+
+Behavior notes:
+
+- `quiltc` wraps the platform over HTTP; do not rely on local runtime CLIs in this guide
+- `apply` and `diff` require `--cluster-id`
+- `apply` validates first by default; use `--no-validate` only when intentionally skipping backend validation
+- `--dry-run` on `k8s apply` uses validate-plus-diff behavior without mutating backend state
 
 ## Practical Decision Rules
 
@@ -626,7 +638,6 @@ Invocation request shape:
   "environment": {
     "EXTRA_VAR": "value"
   },
-  "async_invoke": false,
   "timeout_seconds": 30
 }
 ```
