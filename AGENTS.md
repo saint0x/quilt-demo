@@ -20,6 +20,7 @@ Use this guide when working with:
 - placements
 - join tokens
 - Kubernetes-style manifest workflows
+- serverless functions
 
 ## Authentication
 
