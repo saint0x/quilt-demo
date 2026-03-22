@@ -7,6 +7,7 @@ This file is the standalone agent guide for the Quilt platform. Treat it as the 
 Use this guide when working with:
 
 - containers
+- elasticity
 - exec jobs
 - snapshots
 - volumes
@@ -20,7 +21,6 @@ Use this guide when working with:
 - placements
 - join tokens
 - Kubernetes-style manifest workflows
-- elasticity
 - serverless functions
 
 ## Authentication
