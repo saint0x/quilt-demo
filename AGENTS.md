@@ -140,35 +140,6 @@ Batch payload contract:
 }
 ```
 
-## Container Resize
-
-Resize belongs to the elasticity surface, but it is still a first-class container operation.
-
-Primary routes:
-
-```text
-POST /api/elasticity/containers/<container_id>/resize
-POST /api/elasticity/control/containers/<container_id>/resize
-```
-
-Resize request shape:
-
-```json
-{
-  "memory_limit_mb": 1536,
-  "cpu_limit_percent": 75
-}
-```
-
-Resize notes:
-
-- both fields are optional, but at least one resource limit should be supplied
-- `POST /api/elasticity/containers/<container_id>/resize` returns the updated limits directly
-- `POST /api/elasticity/control/containers/<container_id>/resize` returns an elasticity control operation record
-- direct resize is for tenant-authenticated callers adjusting a live container directly
-- control resize is for orchestrators and must include `X-Tenant-Id`, `Idempotency-Key`, and `X-Orch-Action-Id`
-- use direct resize for immediate mutation and control resize for durable orchestration flows
-
 ## Elasticity
 
 Elasticity covers policy-driven resource changes and orchestrator-safe control actions for containers, functions, and workload placement.
@@ -195,12 +166,22 @@ POST /api/elasticity/control/actions/<action_id>/rollback
 
 Important semantics:
 
+- resize is part of elasticity; there is no separate resize model outside this section
 - tenant-facing elasticity routes mutate the target directly and return the updated resource state
 - control routes are orchestrator-facing and are operation-driven
 - control writes should be treated as idempotent actions keyed by `Idempotency-Key`
 - control writes must carry tenant scope explicitly via `X-Tenant-Id`
 - `X-Orch-Action-Id` is the stable correlation key for operation lookup and rollback
 - the control contract route is the source of truth for backend-owned elasticity endpoints
+
+Resize payload:
+
+```json
+{
+  "memory_limit_mb": 1536,
+  "cpu_limit_percent": 75
+}
+```
 
 Common control headers:
 
