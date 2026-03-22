@@ -1,0 +1,21 @@
+{
+  "name": "quilt-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "verify:all": "node --env-file=.env --import tsx scripts/verify-http.ts && node --env-file=.env --import tsx scripts/verify-sdk.ts && node --env-file=.env --import tsx scripts/verify-control-plane.ts && node --env-file=.env --import tsx scripts/verify-interactive.ts",
+    "verify:control-plane": "node --env-file=.env --import tsx scripts/verify-control-plane.ts",
+    "verify:http": "node --env-file=.env --import tsx scripts/verify-http.ts",
+    "verify:interactive": "node --env-file=.env --import tsx scripts/verify-interactive.ts",
+    "verify:sdk": "node --env-file=.env --import tsx scripts/verify-sdk.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "protobufjs": "^8.0.0",
+    "quilt-sdk": "^0.0.2",
+    "ws": "^8.20.0"
+  }
+}

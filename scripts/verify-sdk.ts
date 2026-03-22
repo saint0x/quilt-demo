@@ -1,0 +1,171 @@
+import { QuiltClient } from "quilt-sdk";
+import {
+  API_KEY,
+  BASE_URL,
+  CleanupStack,
+  assert,
+  createPublicContainer,
+  deletePublicContainer,
+  request,
+  sleep,
+  suffix,
+} from "./_helpers.js";
+
+async function main(): Promise<void> {
+  const cleanup = new CleanupStack();
+  const auth =
+    API_KEY !== undefined
+      ? { apiKey: API_KEY }
+      : process.env.QUILT_JWT
+        ? { token: process.env.QUILT_JWT }
+        : {};
+  const client = QuiltClient.connect({
+    baseUrl: BASE_URL,
+    ...auth,
+  });
+
+  const lines: string[] = [];
+
+  try {
+    const health = (await client.system.health()) as Record<string, unknown>;
+    const info = (await client.system.info()) as Record<string, unknown>;
+    assert(String(health.status) === "ok", "SDK health failed");
+    assert(Object.keys(info).length > 0, "SDK system info empty");
+    lines.push(`system.health=${String(health.status)}`);
+
+    const { containerId, name, operationId } = await createPublicContainer("sdk-verify");
+    cleanup.defer(async () => deletePublicContainer(containerId));
+    lines.push(`public create ok operation=${operationId} container=${containerId}`);
+
+    const listed = (await client.containers.list()) as { containers: Array<Record<string, unknown>> };
+    const fetched = (await client.containers.get(containerId)) as Record<string, unknown>;
+    const byName = (await client.containers.byName(name)) as Record<string, unknown>;
+    const ready = await client.platform.checkContainerReady(containerId);
+    assert(Array.isArray(listed.containers), "SDK container list malformed");
+    assert(String(fetched.container_id) === containerId, "SDK container get mismatch");
+    assert(String(byName.container_id) === containerId, "SDK byName mismatch");
+    assert(ready.ready === true, "SDK ready check failed");
+    lines.push(`containers.get/byName/ready ok for ${name}`);
+
+    await client.platform.patchContainerEnv(containerId, { SDK_PATCH: "1", SDK_KEEP: "yes" });
+    const envPatched = await client.platform.getContainerEnv(containerId);
+    assert(envPatched.environment.SDK_PATCH === "1", "SDK env patch missing");
+    await client.platform.replaceContainerEnv(containerId, { SDK_REPLACED: "true" });
+    const envReplaced = await client.platform.getContainerEnv(containerId);
+    assert(envReplaced.environment.SDK_REPLACED === "true", "SDK env replace missing");
+    assert(!("SDK_KEEP" in envReplaced.environment), "SDK env replace retained old key");
+    lines.push(`platform env patch/replace ok`);
+
+    const execAccepted = (await client.containers.exec(containerId, {
+      command: ["sh", "-lc", "echo sdk-exec-ok"],
+      workdir: "/",
+      timeout_ms: 10_000,
+    })) as { job_id: string };
+    const execJob = await waitForSdkJob(client, containerId, execAccepted.job_id);
+    assert(String(execJob.status) === "completed", "SDK exec did not complete");
+    assert(String(execJob.stdout ?? "").includes("sdk-exec-ok"), "SDK exec stdout mismatch");
+    const jobs = await client.platform.listContainerJobs(containerId);
+    assert(Array.isArray(jobs.jobs) && jobs.jobs.length > 0, "SDK job list empty");
+    lines.push(`containers.exec ok job=${execAccepted.job_id}`);
+
+    const volumeName = suffix("sdk-vol");
+    await client.volumes.create({ name: volumeName, driver: "local", labels: { suite: "sdk" } });
+    cleanup.defer(async () => {
+      try {
+        const accepted = (await client.volumes.delete(volumeName, "async")) as { operation_id?: string };
+        if (accepted.operation_id) {
+          await client.awaitOperation(accepted.operation_id, { timeoutMs: 60_000 });
+        }
+      } catch {
+        // Cleanup should not mask test results.
+      }
+    });
+    await client.platform.putVolumeFile(volumeName, {
+      path: "/sdk.txt",
+      content: Buffer.from("sdk-volume-ok", "utf8").toString("base64"),
+      mode: 0o644,
+    });
+    const volumeFile = await client.platform.getVolumeFile(volumeName, "sdk.txt");
+    assert(Buffer.from(volumeFile.content, "base64").toString("utf8") === "sdk-volume-ok", "SDK volume file mismatch");
+    const volumeInspect = await client.volumes.inspect(volumeName);
+    const volumeLs = (await client.volumes.listFiles(volumeName)) as { files: Array<Record<string, unknown>> };
+    assert(Object.keys(volumeInspect).length > 0, "SDK volume inspect empty");
+    assert(Array.isArray(volumeLs.files), "SDK volume ls malformed");
+    lines.push(`volumes create/file/inspect ok name=${volumeName}`);
+
+    const functionName = suffix("sdk-fn");
+    const createdFn = (await client.functions.create({
+      name: functionName,
+      handler: "echo sdk-function-ok",
+      runtime: "shell",
+      memory_limit_mb: 256,
+      cpu_limit_percent: 25,
+      timeout_seconds: 15,
+      min_instances: 0,
+      max_instances: 1,
+      cleanup_on_exit: true,
+    })) as { function_id: string };
+    const functionId = createdFn.function_id;
+    cleanup.defer(async () => {
+      await request("DELETE", `/api/functions/${functionId}`);
+    });
+    await client.functions.deploy(functionId);
+    const fnGet = (await client.functions.get(functionId)) as Record<string, unknown>;
+    const fnByName = (await client.functions.byName(functionName)) as Record<string, unknown>;
+    const invocation = (await client.functions.invoke(functionId, {
+      payload: "{\"sdk\":true}",
+      timeout_seconds: 15,
+    })) as Record<string, unknown>;
+    const invocationId = String(invocation.invocation_id ?? "");
+    const invocationGet = (await client.functions.getInvocation(functionId, invocationId)) as Record<string, unknown>;
+    const versions = (await client.functions.listVersions(functionId)) as { versions: Array<Record<string, unknown>> };
+    const pool = (await client.functions.pool(functionId)) as Record<string, unknown>;
+    const poolStats = (await client.functions.poolStats()) as Record<string, unknown>;
+    assert(String(fnGet.id) === functionId, "SDK function get mismatch");
+    assert(String(fnByName.id) === functionId, "SDK function by-name mismatch");
+    assert(String(invocationGet.status) === "success", "SDK function invoke status mismatch");
+    assert(String(invocationGet.stdout ?? "").includes("sdk-function-ok"), "SDK function stdout mismatch");
+    assert(Array.isArray(versions.versions) && versions.versions.length >= 1, "SDK version list empty");
+    assert(Object.keys(pool).length > 0, "SDK pool empty");
+    assert(Object.keys(poolStats).length > 0, "SDK pool stats empty");
+    lines.push(`functions create/deploy/invoke ok function=${functionId}`);
+
+    const rawOps = (await client.raw<Record<string, unknown>>("get", `/api/containers/${containerId}/network`)) as Record<
+      string,
+      unknown
+    >;
+    assert(Object.keys(rawOps).length > 0, "SDK raw request returned empty payload");
+    lines.push(`client.raw authenticated path ok`);
+  } finally {
+    await cleanup.run();
+  }
+
+  console.log("SDK verification summary");
+  for (const line of lines) {
+    console.log(`- ${line}`);
+  }
+}
+
+async function waitForSdkJob(
+  client: QuiltClient,
+  containerId: string,
+  jobId: string,
+  timeoutMs = 60_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const job = (await client.platform.getContainerJob(containerId, jobId, true)) as Record<string, unknown>;
+    const status = String(job.status ?? "");
+    if (["completed", "failed", "timed_out"].includes(status)) {
+      return job;
+    }
+    await sleep(250);
+  }
+  throw new Error(`SDK job ${jobId} did not complete within ${timeoutMs}ms`);
+}
+
+main().catch((error) => {
+  console.error("SDK verification failed");
+  console.error(error);
+  process.exitCode = 1;
+});
