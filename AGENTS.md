@@ -7,6 +7,7 @@ This file is the standalone agent guide for the Quilt platform. Treat it as the 
 Use this guide when working with:
 
 - containers
+- container resizing
 - exec jobs
 - snapshots
 - volumes
@@ -82,17 +83,21 @@ GET    /api/containers/<container_id>/metrics
 GET    /api/containers/<container_id>/logs?limit=<n>
 POST   /api/containers
 POST   /api/containers/<container_id>/start
+POST   /api/containers/<container_id>/rename
+POST   /api/containers/<container_id>/kill
 POST   /api/containers/<container_id>/stop?execution=async
 POST   /api/containers/<container_id>/resume?execution=async
-POST   /api/containers/<container_id>/kill
+POST   /api/elasticity/containers/<container_id>/resize
+POST   /api/elasticity/control/containers/<container_id>/resize
 DELETE /api/containers/<container_id>?execution=async
-POST   /api/containers/<container_id>/rename
 ```
 
 Important semantics:
 
 - `start` is immediate
 - `stop`, `resume`, and delete are operation-driven and should return `202`
+- direct resize mutates the container resource immediately for tenant-authenticated callers
+- control resize is operation-driven, requires `Idempotency-Key`, `X-Tenant-Id`, and `X-Orch-Action-Id`, and should be used by orchestrators
 - readiness should be checked explicitly; do not assume a created or resumed container is ready yet
 - resolving by name is helpful, but IDs are the safer handle once a target is known
 
@@ -138,6 +143,21 @@ Batch payload contract:
   ]
 }
 ```
+
+Resize request shape:
+
+```json
+{
+  "memory_limit_mb": 1536,
+  "cpu_limit_percent": 75
+}
+```
+
+Resize notes:
+
+- both fields are optional, but at least one resource limit should be supplied
+- `POST /api/elasticity/containers/<container_id>/resize` returns the updated limits directly
+- `POST /api/elasticity/control/containers/<container_id>/resize` returns an elasticity control operation record
 
 ## Exec Contract
 

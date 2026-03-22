@@ -4,7 +4,7 @@ import {
   request,
   requestOk,
   suffix,
-} from "./_helpers.js";
+} from "./lib.js";
 
 type ClusterResponse = {
   id: string;
@@ -448,14 +448,14 @@ async function main(): Promise<void> {
     await cleanup.run();
   }
 
-  console.log("Control-plane verification summary");
+  console.log("Clusters, nodes, workloads, and k8s example summary");
   for (const line of lines) {
     console.log(`- ${line}`);
   }
 }
 
 main().catch((error) => {
-  console.error("Control-plane verification failed");
+  console.error("Clusters, nodes, workloads, and k8s example failed");
   console.error(error);
   process.exitCode = 1;
 });

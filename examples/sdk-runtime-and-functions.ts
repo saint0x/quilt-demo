@@ -9,7 +9,7 @@ import {
   request,
   sleep,
   suffix,
-} from "./_helpers.js";
+} from "./lib.js";
 
 async function main(): Promise<void> {
   const cleanup = new CleanupStack();
@@ -140,7 +140,7 @@ async function main(): Promise<void> {
     await cleanup.run();
   }
 
-  console.log("SDK verification summary");
+  console.log("SDK runtime and functions example summary");
   for (const line of lines) {
     console.log(`- ${line}`);
   }
@@ -165,7 +165,7 @@ async function waitForSdkJob(
 }
 
 main().catch((error) => {
-  console.error("SDK verification failed");
+  console.error("SDK runtime and functions example failed");
   console.error(error);
   process.exitCode = 1;
 });

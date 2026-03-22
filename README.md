@@ -11,6 +11,29 @@ Quilt has two primary CLI surfaces that together make up the platform guide:
 
 This README covers both.
 
+## Runnable Examples
+
+The repo includes runnable TypeScript examples under [`examples/`](./examples):
+
+- `examples/containers-volumes-and-network.ts`
+- `examples/sdk-runtime-and-functions.ts`
+- `examples/clusters-nodes-workloads-and-k8s.ts`
+- `examples/terminal-and-icc.ts`
+- `examples/elasticity-control.ts`
+- `examples/lifecycle-and-failures.ts`
+
+Run them with:
+
+```bash
+npm run example:containers
+npm run example:sdk
+npm run example:clusters
+npm run example:terminal
+npm run example:elasticity
+npm run example:lifecycle
+npm run examples:all
+```
+
 ## `quilt.sh` Overview
 
 `quilt.sh` is the direct runtime shell client for the Quilt platform. Use it when you need hands-on control of runtime resources and want a thin wrapper over the runtime API contract.
@@ -135,14 +158,14 @@ quiltc k8s export --cluster-id <cluster_id> -o yaml
 |---------|-------------|
 | `./quilt.sh list [state]` | List all containers (optional filter: running, stopped, exited) |
 | `./quilt.sh get <id>` | Get detailed information about a specific container |
-| `./quilt.sh create [--async\|--sync] <name> [cmd]` | Create one container (`async_mode` default is `false`) |
-| `./quilt.sh create-batch [--async\|--sync] --file <batch.json>` | Batch create via `POST /api/containers/batch` |
-| `./quilt.sh start <id> [--async\|--sync]` | Start container (immediate 200 response) |
-| `./quilt.sh stop <id> [--async\|--sync]` | Stop container (sync 200 or async 202) |
-| `./quilt.sh rm <id> [--async\|--sync]` | Delete container (sync 200 JSON or async 202) |
-| `./quilt.sh resume <id> [--async\|--sync]` | Resume container |
-| `./quilt.sh fork <id> [name] [--async\|--sync]` | Fork container |
-| `./quilt.sh clone <snapshot_id> [name] [--async\|--sync]` | Clone snapshot |
+| `./quilt.sh create <name> [cmd]` | Create one container (operation-driven) |
+| `./quilt.sh create-batch --file <batch.json>` | Batch create via `POST /api/containers/batch` |
+| `./quilt.sh start <id>` | Start container |
+| `./quilt.sh stop <id>` | Stop container (operation-driven) |
+| `./quilt.sh rm <id>` | Delete container (operation-driven) |
+| `./quilt.sh resume <id>` | Resume container (operation-driven) |
+| `./quilt.sh fork <id> [name]` | Fork container (operation-driven) |
+| `./quilt.sh clone <snapshot_id> [name]` | Clone snapshot (operation-driven) |
 
 ### Container Operations
 
@@ -164,47 +187,17 @@ quiltc k8s export --cluster-id <cluster_id> -o yaml
 | `./quilt.sh op-status <operation_id>` | Get status for any operation |
 | `./quilt.sh op-wait <operation_id> [--interval-ms=1000] [--timeout-ms=300000]` | Poll until terminal operation state |
 
-## Async Operation Model
+## Operation Model
 
-- `async_mode` is now supported on:
-  - `create`, `create-batch`, `stop`, `rm`, `fork`, `clone`, `resume`
-  - `start` also accepts optional `async_mode` but still returns immediate success payload
-- CLI default is `--sync` (`async_mode=false`).
-- Async accepted response returns HTTP `202` with:
+- create, batch create, stop, delete, fork, clone, and resume are operation-driven
+- the accepted response returns HTTP `202` with:
 
 ```json
 { "success": true, "operation_id": "...", "status_url": "/api/operations/..." }
 ```
 
-- Batch sync responses:
-  - `201` when all succeeded
-  - `207` for partial failures with `requested/succeeded/failed/results`
-
-### Create Response Modes
-
-- Sync `create` (`201`):
-
-```json
-{
-  "container_id": "...",
-  "name": "...",
-  "ip_address": "...",
-  "operation_id": null,
-  "status_url": null
-}
-```
-
-- Async `create` (`202`): accepted operation payload.
-
-### Delete Response Modes
-
-- Sync delete now returns HTTP `200` JSON:
-
-```json
-{ "success": true, "message": "Container removed successfully" }
-```
-
-- Async delete returns HTTP `202` accepted operation payload.
+- start is immediate, but readiness still needs to be checked explicitly
+- use `./quilt.sh op-status` or `./quilt.sh op-wait` to observe terminal completion
 
 ## Batch File Format
 

@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { QuiltApiError, QuiltClient } from "quilt-sdk";
 
 export const BASE_URL = process.env.QUILT_BASE_URL ?? "http://127.0.0.1:52559";
 export const API_KEY = process.env.QUILT_API_KEY;
@@ -65,6 +66,17 @@ export async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function createClient(): QuiltClient {
+  return QuiltClient.connect({
+    baseUrl: BASE_URL,
+    ...(API_KEY ? { apiKey: API_KEY } : JWT ? { token: JWT } : {}),
+  });
+}
+
+function createUnauthedClient(): QuiltClient {
+  return QuiltClient.connect({ baseUrl: BASE_URL });
+}
+
 export async function request<T = unknown>(
   method: string,
   path: string,
@@ -75,32 +87,21 @@ export async function request<T = unknown>(
     signal?: AbortSignal;
   },
 ): Promise<{ status: number; data: T; headers: Headers }> {
-  const url = new URL(path, BASE_URL);
-  for (const [key, value] of Object.entries(options?.query ?? {})) {
-    if (value === undefined) {
-      continue;
+  const client = createClient();
+  try {
+    const data = await client.raw<T>(method, path, {
+      query: options?.query,
+      headers: options?.headers,
+      body: options?.body,
+      signal: options?.signal,
+    });
+    return { status: 200, data, headers: new Headers() };
+  } catch (error) {
+    if (error instanceof QuiltApiError) {
+      return { status: error.status, data: error.body as T, headers: new Headers() };
     }
-    url.searchParams.set(key, String(value));
+    throw error;
   }
-
-  const hasJsonBody = options?.body !== undefined;
-  const response = await fetch(url, {
-    method,
-    headers: buildHeaders({
-      ...(hasJsonBody ? { "Content-Type": "application/json" } : {}),
-      ...(options?.headers ?? {}),
-    }),
-    body: hasJsonBody ? JSON.stringify(options.body) : undefined,
-    signal: options?.signal,
-  });
-
-  const text = await response.text();
-  const contentType = response.headers.get("content-type") ?? "";
-  const data = contentType.includes("application/json")
-    ? (JSON.parse(text || "null") as T)
-    : (text as T);
-
-  return { status: response.status, data, headers: response.headers };
 }
 
 export async function requestOk<T = unknown>(
@@ -181,30 +182,21 @@ export async function requestUnauthed(
     signal?: AbortSignal;
   },
 ): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const url = new URL(path, BASE_URL);
-  for (const [key, value] of Object.entries(options?.query ?? {})) {
-    if (value === undefined) {
-      continue;
+  const client = createUnauthedClient();
+  try {
+    const data = await client.raw(method, path, {
+      query: options?.query,
+      headers: options?.headers,
+      body: options?.body,
+      signal: options?.signal,
+    });
+    return { status: 200, data, headers: new Headers() };
+  } catch (error) {
+    if (error instanceof QuiltApiError) {
+      return { status: error.status, data: error.body, headers: new Headers() };
     }
-    url.searchParams.set(key, String(value));
+    throw error;
   }
-
-  const hasJsonBody = options?.body !== undefined;
-  const response = await fetch(url, {
-    method,
-    headers: {
-      Accept: "application/json",
-      ...(hasJsonBody ? { "Content-Type": "application/json" } : {}),
-      ...(options?.headers ?? {}),
-    },
-    body: hasJsonBody ? JSON.stringify(options.body) : undefined,
-    signal: options?.signal,
-  });
-
-  const text = await response.text();
-  const contentType = response.headers.get("content-type") ?? "";
-  const data = contentType.includes("application/json") ? JSON.parse(text || "null") : text;
-  return { status: response.status, data, headers: response.headers };
 }
 
 export async function readFirstSseEvent(timeoutMs = 5_000): Promise<string> {
@@ -244,8 +236,9 @@ export async function createAdminContainer(namePrefix: string): Promise<{
   containerId: string;
   name: string;
 }> {
+  const client = createClient();
   const name = suffix(namePrefix);
-  const response = await requestOk<{ container_id: string }>("POST", "/api/admin/containers", {
+  const response = await client.raw<{ container_id: string }>("post", "/api/admin/containers", {
     body: {
       tenant_id: DEFAULT_TENANT_ID,
       name,
@@ -260,10 +253,8 @@ export async function createAdminContainer(namePrefix: string): Promise<{
 }
 
 export async function deleteAdminContainer(containerId: string): Promise<void> {
-  const result = await request("DELETE", `/api/admin/containers/${containerId}`, {
-    query: { force: true },
-  });
-  if (result.status !== 204 && result.status !== 404) {
+  const result = await request("DELETE", `/api/admin/containers/${containerId}`, { query: { force: true } });
+  if (result.status !== 200 && result.status !== 204 && result.status !== 404) {
     throw new Error(`DELETE /api/admin/containers/${containerId} failed: ${result.status}`);
   }
 }
@@ -273,17 +264,16 @@ export async function createPublicContainer(namePrefix: string): Promise<{
   name: string;
   operationId: string;
 }> {
+  const client = createClient();
   const name = suffix(namePrefix);
-  const accepted = await requestOk<{ operation_id: string }>("POST", "/api/containers", {
-    body: {
-      name,
-      image: "prod",
-      command: ["tail", "-f", "/dev/null"],
-      memory_limit_mb: 256,
-      cpu_limit_percent: 25,
-    },
+  const accepted = await client.containers.create({
+    name,
+    image: "prod",
+    command: ["tail", "-f", "/dev/null"],
+    memory_limit_mb: 256,
+    cpu_limit_percent: 25,
   });
-  const operation = await waitForOperation(accepted.operation_id);
+  const operation = await client.awaitOperation(accepted.operation_id, { timeoutMs: 120_000 });
   if (String(operation.status) !== "succeeded") {
     throw new Error(`container create operation failed: ${JSON.stringify(operation)}`);
   }
@@ -292,24 +282,24 @@ export async function createPublicContainer(namePrefix: string): Promise<{
   const containerId =
     typeof result.container_id === "string"
       ? result.container_id
-      : String(
-          (await requestOk<Record<string, unknown>>("GET", `/api/containers/by-name/${name}`)).container_id ?? "",
-        );
+      : String((await client.containers.byName(name)).container_id ?? "");
   assert(containerId, `container create for ${name} did not yield a container_id`);
   return { containerId, name, operationId: accepted.operation_id };
 }
 
 export async function deletePublicContainer(containerId: string): Promise<void> {
-  const result = await request<{ operation_id?: string }>("DELETE", `/api/containers/${containerId}`);
-  if (result.status === 404) {
+  const client = createClient();
+  try {
+    const accepted = await client.containers.remove(containerId);
+    if (accepted.operation_id) {
+      await client.awaitOperation(accepted.operation_id, { timeoutMs: 120_000 });
+    }
     return;
-  }
-  if (result.status !== 202) {
-    throw new Error(`DELETE /api/containers/${containerId} failed: ${result.status}`);
-  }
-  const data = result.data as { operation_id?: string };
-  if (data.operation_id) {
-    await waitForOperation(data.operation_id, 120_000);
+  } catch (error) {
+    if (error instanceof QuiltApiError && error.status === 404) {
+      return;
+    }
+    throw error;
   }
 }
 

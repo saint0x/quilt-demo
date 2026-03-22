@@ -10,7 +10,7 @@ import {
   waitForContainerState,
   waitForJob,
   waitForOperation,
-} from "./_helpers.js";
+} from "./lib.js";
 
 async function main(): Promise<void> {
   const cleanup = new CleanupStack();
@@ -196,7 +196,10 @@ async function main(): Promise<void> {
     } finally {
       if (functionId) {
         const deleted = await request("DELETE", `/api/functions/${functionId}`);
-        assert(deleted.status === 204 || deleted.status === 404, `function delete failed: ${deleted.status}`);
+        assert(
+          deleted.status === 200 || deleted.status === 204 || deleted.status === 404,
+          `function delete failed: ${deleted.status}`,
+        );
       }
     }
 
@@ -224,14 +227,14 @@ async function main(): Promise<void> {
     await cleanup.run();
   }
 
-  console.log("Lifecycle verification summary");
+  console.log("Lifecycle and failure-path example summary");
   for (const line of lines) {
     console.log(`- ${line}`);
   }
 }
 
 main().catch((error) => {
-  console.error("Lifecycle verification failed");
+  console.error("Lifecycle and failure-path example failed");
   console.error(error);
   process.exitCode = 1;
 });

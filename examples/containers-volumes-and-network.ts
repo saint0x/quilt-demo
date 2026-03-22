@@ -11,7 +11,7 @@ import {
   suffix,
   waitForJob,
   waitForOperation,
-} from "./_helpers.js";
+} from "./lib.js";
 
 type CheckResult = {
   chunk: string;
@@ -323,7 +323,7 @@ async function main(): Promise<void> {
     await cleanup.run();
   }
 
-  console.log("HTTP verification summary");
+  console.log("Containers, volumes, and network example summary");
   for (const result of results) {
     console.log(`- [${result.ok ? "pass" : "fail"}] ${result.chunk}`);
     for (const note of result.notes) {
@@ -339,7 +339,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error("HTTP verification failed");
+  console.error("Containers, volumes, and network example failed");
   console.error(error);
   process.exitCode = 1;
 });
