@@ -169,6 +169,98 @@ Resize notes:
 - control resize is for orchestrators and must include `X-Tenant-Id`, `Idempotency-Key`, and `X-Orch-Action-Id`
 - use direct resize for immediate mutation and control resize for durable orchestration flows
 
+## Elasticity
+
+Elasticity covers policy-driven resource changes and orchestrator-safe control actions for containers, functions, and workload placement.
+
+Primary routes:
+
+```text
+GET  /api/elasticity/node/status
+GET  /api/elasticity/control/contract
+GET  /api/elasticity/control/operations/<operation_id>
+GET  /api/elasticity/control/actions/<action_id>/operations
+POST /api/elasticity/containers/<container_id>/resize
+POST /api/elasticity/functions/<function_id>/pool-target
+POST /api/elasticity/control/containers/<container_id>/resize
+POST /api/elasticity/control/functions/<function_id>/pool-target
+PUT  /api/elasticity/control/workloads/<workload_id>/function-binding
+GET  /api/elasticity/control/workloads/<workload_id>/function-binding
+POST /api/elasticity/control/workloads/<workload_id>/function-binding/rotate
+PUT  /api/elasticity/control/workloads/<workload_id>/placement-preference
+GET  /api/elasticity/control/workloads/<workload_id>/placement-preference
+POST /api/elasticity/control/node-groups/<node_group>/scale
+POST /api/elasticity/control/actions/<action_id>/rollback
+```
+
+Important semantics:
+
+- tenant-facing elasticity routes mutate the target directly and return the updated resource state
+- control routes are orchestrator-facing and are operation-driven
+- control writes should be treated as idempotent actions keyed by `Idempotency-Key`
+- control writes must carry tenant scope explicitly via `X-Tenant-Id`
+- `X-Orch-Action-Id` is the stable correlation key for operation lookup and rollback
+- the control contract route is the source of truth for backend-owned elasticity endpoints
+
+Common control headers:
+
+```text
+X-Tenant-Id: <tenant_id>
+Idempotency-Key: <idempotency_key>
+X-Orch-Action-Id: <orchestrator_action_id>
+```
+
+Pool target payload:
+
+```json
+{
+  "min_instances": 1,
+  "max_instances": 4
+}
+```
+
+Workload function binding payload:
+
+```json
+{
+  "function_id": "fn_123"
+}
+```
+
+Workload function rotation payload:
+
+```json
+{
+  "next_function_id": "fn_456",
+  "cutover_at": 1774200000
+}
+```
+
+Workload placement preference payload:
+
+```json
+{
+  "node_group": "group-a",
+  "anti_affinity": true
+}
+```
+
+Node group scale payload:
+
+```json
+{
+  "delta_units": 1
+}
+```
+
+Rollback payload:
+
+```json
+{
+  "reason": "rollback requested by orchestrator"
+}
+```
+
 ## Exec Contract
 
 Primary route:
@@ -522,98 +614,6 @@ Broadcast payload shape:
 ```
 
 Agent rule: use ICC when multiple containers need direct local comms with a real messaging protocol. Do not reach for it when plain HTTP through the normal reverse-proxy path is the actual requirement.
-
-## Elasticity
-
-Elasticity covers policy-driven resource changes and orchestrator-safe control actions.
-
-Primary routes:
-
-```text
-GET  /api/elasticity/node/status
-GET  /api/elasticity/control/contract
-GET  /api/elasticity/control/operations/<operation_id>
-GET  /api/elasticity/control/actions/<action_id>/operations
-POST /api/elasticity/containers/<container_id>/resize
-POST /api/elasticity/functions/<function_id>/pool-target
-POST /api/elasticity/control/containers/<container_id>/resize
-POST /api/elasticity/control/functions/<function_id>/pool-target
-PUT  /api/elasticity/control/workloads/<workload_id>/function-binding
-GET  /api/elasticity/control/workloads/<workload_id>/function-binding
-POST /api/elasticity/control/workloads/<workload_id>/function-binding/rotate
-PUT  /api/elasticity/control/workloads/<workload_id>/placement-preference
-GET  /api/elasticity/control/workloads/<workload_id>/placement-preference
-POST /api/elasticity/control/node-groups/<node_group>/scale
-POST /api/elasticity/control/actions/<action_id>/rollback
-```
-
-Important semantics:
-
-- tenant-facing elasticity routes mutate the target directly and return the updated resource state
-- control routes are orchestrator-facing and are operation-driven
-- control writes should be treated as idempotent actions keyed by `Idempotency-Key`
-- control writes must carry tenant scope explicitly via `X-Tenant-Id`
-- `X-Orch-Action-Id` is the stable correlation key for operation lookup and rollback
-- the control contract route is the source of truth for backend-owned elasticity endpoints
-
-Common control headers:
-
-```text
-X-Tenant-Id: <tenant_id>
-Idempotency-Key: <idempotency_key>
-X-Orch-Action-Id: <orchestrator_action_id>
-```
-
-Pool target payload:
-
-```json
-{
-  "min_instances": 1,
-  "max_instances": 4
-}
-```
-
-Workload function binding payload:
-
-```json
-{
-  "function_id": "fn_123"
-}
-```
-
-Workload function rotation payload:
-
-```json
-{
-  "next_function_id": "fn_456",
-  "cutover_at": 1774200000
-}
-```
-
-Workload placement preference payload:
-
-```json
-{
-  "node_group": "group-a",
-  "anti_affinity": true
-}
-```
-
-Node group scale payload:
-
-```json
-{
-  "delta_units": 1
-}
-```
-
-Rollback payload:
-
-```json
-{
-  "reason": "rollback requested by orchestrator"
-}
-```
 
 ## CLI Surfaces
 
