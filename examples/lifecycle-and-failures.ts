@@ -1,24 +1,19 @@
-import {
-	assert,
-	CleanupStack,
-	createClient,
-	createPublicContainer,
-	createUnauthedClient,
-	deletePublicContainer,
-	expectApiError,
-	suffix,
-	waitForContainerState,
-	waitForJob,
-	waitForOperation,
-} from "./lib.js";
+import { QuiltApiError, QuiltClient, type QuiltClientOptions } from "quilt-sdk";
+
+const BASE_URL = process.env.QUILT_BASE_URL ?? "https://backend.quilt.sh";
+const API_KEY = process.env.QUILT_API_KEY;
+const JWT = process.env.QUILT_JWT;
 
 async function main(): Promise<void> {
 	const cleanup = new CleanupStack();
 	const client = createClient();
 	const lines: string[] = [];
 
-	const { containerId } = await createPublicContainer("lifecycle-example");
-	cleanup.defer(async () => deletePublicContainer(containerId));
+	const { containerId } = await createPublicContainer(
+		client,
+		"lifecycle-example",
+	);
+	cleanup.defer(async () => deletePublicContainer(client, containerId));
 
 	try {
 		const initialMetrics = (await client.containers.metrics(
@@ -109,9 +104,16 @@ async function main(): Promise<void> {
 		const snapshotId = String(snapshot.snapshot_id ?? "");
 		assert(snapshotId, "snapshot_id missing");
 		cleanup.defer(async () => {
-			await client.raw("delete", "/api/snapshots/{snapshot_id}", {
-				pathParams: { snapshot_id: snapshotId },
-			});
+			try {
+				await client.raw("delete", "/api/snapshots/{snapshot_id}", {
+					pathParams: { snapshot_id: snapshotId },
+				});
+			} catch (error) {
+				if (isNotFound(error)) {
+					return;
+				}
+				throw error;
+			}
 		});
 		const pin = (await client.raw("post", "/api/snapshots/{snapshot_id}/pin", {
 			pathParams: { snapshot_id: snapshotId },
@@ -281,6 +283,194 @@ async function main(): Promise<void> {
 	for (const line of lines) {
 		console.log(`- ${line}`);
 	}
+}
+
+function createClient(options: Partial<QuiltClientOptions> = {}): QuiltClient {
+	return QuiltClient.connect({
+		baseUrl: BASE_URL,
+		...(API_KEY ? { apiKey: API_KEY } : JWT ? { token: JWT } : {}),
+		...options,
+	});
+}
+
+function createUnauthedClient(): QuiltClient {
+	return QuiltClient.connect({ baseUrl: BASE_URL });
+}
+
+class CleanupStack {
+	private readonly tasks: Array<() => Promise<void>> = [];
+
+	defer(task: () => Promise<void>): void {
+		this.tasks.push(task);
+	}
+
+	async run(): Promise<void> {
+		while (this.tasks.length > 0) {
+			const task = this.tasks.pop();
+			if (!task) {
+				continue;
+			}
+			try {
+				await task();
+			} catch (error) {
+				console.warn("[cleanup] task failed:", error);
+			}
+		}
+	}
+}
+
+function assert(condition: unknown, message: string): asserts condition {
+	if (!condition) {
+		throw new Error(message);
+	}
+}
+
+function suffix(prefix: string): string {
+	return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+}
+
+async function sleep(ms: number): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForOperation(
+	client: QuiltClient,
+	operationId: string,
+	timeoutMs = 120_000,
+) {
+	return await client.awaitOperation(operationId, {
+		timeoutMs,
+		intervalMs: 250,
+	});
+}
+
+async function waitForJob(
+	client: QuiltClient,
+	containerId: string,
+	jobId: string,
+	timeoutMs = 60_000,
+): Promise<Record<string, unknown>> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const job = await client.platform.getContainerJob(containerId, jobId, true);
+		const status = String(job.status ?? "");
+		if (["completed", "failed", "timed_out"].includes(status)) {
+			return job;
+		}
+		await sleep(250);
+	}
+	throw new Error(`job ${jobId} did not complete within ${timeoutMs}ms`);
+}
+
+async function waitForContainerState(
+	client: QuiltClient,
+	containerId: string,
+	expectedStates: string[],
+	timeoutMs = 60_000,
+): Promise<Record<string, unknown>> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const container = (await client.containers.get(containerId)) as Record<
+			string,
+			unknown
+		>;
+		const state = String(container.state ?? "");
+		if (expectedStates.includes(state)) {
+			return container;
+		}
+		await sleep(250);
+	}
+	throw new Error(
+		`container ${containerId} did not reach one of [${expectedStates.join(", ")}] within ${timeoutMs}ms`,
+	);
+}
+
+async function expectApiError(
+	op: () => Promise<unknown>,
+): Promise<{ status: number; body: unknown }> {
+	try {
+		await op();
+	} catch (error) {
+		if (isQuiltApiError(error)) {
+			return { status: error.status, body: error.body };
+		}
+		throw error;
+	}
+	throw new Error("expected API error but call succeeded");
+}
+
+async function createPublicContainer(
+	client: QuiltClient,
+	namePrefix: string,
+): Promise<{ containerId: string }> {
+	const name = suffix(namePrefix);
+	const accepted = await client.containers.create({
+		name,
+		image: "prod",
+		command: ["tail", "-f", "/dev/null"],
+		memory_limit_mb: 256,
+		cpu_limit_percent: 25,
+	});
+	const operation = await client.awaitOperation(accepted.operation_id, {
+		timeoutMs: 120_000,
+	});
+	if (String(operation.status) !== "succeeded") {
+		throw new Error(
+			`container create operation failed: ${JSON.stringify(operation)}`,
+		);
+	}
+	const result =
+		(operation.result as Record<string, unknown> | undefined) ?? {};
+	const containerId =
+		typeof result.container_id === "string"
+			? result.container_id
+			: String((await client.containers.byName(name)).container_id ?? "");
+	assert(
+		containerId,
+		`container create for ${name} did not yield a container_id`,
+	);
+	return { containerId };
+}
+
+async function deletePublicContainer(
+	client: QuiltClient,
+	containerId: string,
+): Promise<void> {
+	try {
+		const accepted = await client.containers.remove(containerId);
+		if (accepted.operation_id) {
+			await client.awaitOperation(accepted.operation_id, {
+				timeoutMs: 120_000,
+			});
+		}
+	} catch (error) {
+		if (isNotFound(error)) {
+			return;
+		}
+		throw error;
+	}
+}
+
+function isNotFound(error: unknown): boolean {
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		"status" in error &&
+		error.status === 404
+	);
+}
+
+function isQuiltApiError(
+	error: unknown,
+): error is { status: number; body: unknown } {
+	return (
+		error instanceof QuiltApiError ||
+		(typeof error === "object" &&
+			error !== null &&
+			"status" in error &&
+			typeof error.status === "number" &&
+			"body" in error)
+	);
 }
 
 main().catch((error) => {

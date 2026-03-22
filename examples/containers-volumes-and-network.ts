@@ -1,18 +1,13 @@
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EventSource } from "eventsource";
+import { QuiltClient, type QuiltClientOptions } from "quilt-sdk";
 
-import {
-	assert,
-	BASE_URL,
-	CleanupStack,
-	createClient,
-	createPublicContainer,
-	createTarGzBase64,
-	deletePublicContainer,
-	readFirstSseEvent,
-	suffix,
-	waitForJob,
-	waitForOperation,
-} from "./lib.js";
+const BASE_URL = process.env.QUILT_BASE_URL ?? "https://backend.quilt.sh";
+const API_KEY = process.env.QUILT_API_KEY;
+const JWT = process.env.QUILT_JWT;
 
 type CheckResult = {
 	chunk: string;
@@ -53,8 +48,8 @@ async function main(): Promise<void> {
 			containerId,
 			name: containerName,
 			operationId,
-		} = await createPublicContainer("http-verify");
-		cleanup.defer(async () => deletePublicContainer(containerId));
+		} = await createPublicContainer(client, "http-verify");
+		cleanup.defer(async () => deletePublicContainer(client, containerId));
 		push("container bootstrap", true, [
 			`container_id=${containerId}`,
 			`name=${containerName}`,
@@ -184,7 +179,9 @@ async function main(): Promise<void> {
 				"",
 		);
 		if (cloneContainerId) {
-			cleanup.defer(async () => deletePublicContainer(cloneContainerId));
+			cleanup.defer(async () =>
+				deletePublicContainer(client, cloneContainerId),
+			);
 		}
 		const forkAccepted = await client.platform.forkContainer(containerId, {
 			name: suffix("http-fork"),
@@ -199,7 +196,7 @@ async function main(): Promise<void> {
 				"",
 		);
 		if (forkContainerId) {
-			cleanup.defer(async () => deletePublicContainer(forkContainerId));
+			cleanup.defer(async () => deletePublicContainer(client, forkContainerId));
 		}
 		push("snapshots", true, [
 			`snapshot_id=${snapshotId}`,
@@ -452,6 +449,218 @@ async function main(): Promise<void> {
 			console.log(`- ${note}`);
 		}
 	}
+}
+
+function createClient(options: Partial<QuiltClientOptions> = {}): QuiltClient {
+	return QuiltClient.connect({
+		baseUrl: BASE_URL,
+		...(API_KEY ? { apiKey: API_KEY } : JWT ? { token: JWT } : {}),
+		...options,
+	});
+}
+
+class CleanupStack {
+	private readonly tasks: Array<() => Promise<void>> = [];
+
+	defer(task: () => Promise<void>): void {
+		this.tasks.push(task);
+	}
+
+	async run(): Promise<void> {
+		while (this.tasks.length > 0) {
+			const task = this.tasks.pop();
+			if (!task) {
+				continue;
+			}
+			try {
+				await task();
+			} catch (error) {
+				console.warn("[cleanup] task failed:", error);
+			}
+		}
+	}
+}
+
+function assert(condition: unknown, message: string): asserts condition {
+	if (!condition) {
+		throw new Error(message);
+	}
+}
+
+function suffix(prefix: string): string {
+	return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+}
+
+async function sleep(ms: number): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForOperation(
+	client: QuiltClient,
+	operationId: string,
+	timeoutMs = 120_000,
+) {
+	return await client.awaitOperation(operationId, {
+		timeoutMs,
+		intervalMs: 250,
+	});
+}
+
+async function waitForJob(
+	client: QuiltClient,
+	containerId: string,
+	jobId: string,
+	timeoutMs = 60_000,
+): Promise<Record<string, unknown>> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const job = await client.platform.getContainerJob(containerId, jobId, true);
+		const status = String(job.status ?? "");
+		if (["completed", "failed", "timed_out"].includes(status)) {
+			return job;
+		}
+		await sleep(250);
+	}
+	throw new Error(`job ${jobId} did not complete within ${timeoutMs}ms`);
+}
+
+async function readFirstSseEvent(
+	client: QuiltClient,
+	timeoutMs = 5_000,
+): Promise<string> {
+	return await new Promise<string>((resolve, reject) => {
+		const eventSource = client.events.openEventSource();
+		const timer = setTimeout(() => {
+			eventSource.close();
+			reject(new Error("event stream timeout before first event"));
+		}, timeoutMs);
+
+		const finish = (value: string) => {
+			clearTimeout(timer);
+			eventSource.close();
+			resolve(value);
+		};
+
+		eventSource.addEventListener("ready", () => {
+			finish("event: ready");
+		});
+
+		eventSource.onerror = () => {
+			clearTimeout(timer);
+			eventSource.close();
+			reject(new Error("event stream errored before first event"));
+		};
+	});
+}
+
+async function createPublicContainer(
+	client: QuiltClient,
+	namePrefix: string,
+): Promise<{ containerId: string; name: string; operationId: string }> {
+	const name = suffix(namePrefix);
+	const accepted = await client.containers.create({
+		name,
+		image: "prod",
+		command: ["tail", "-f", "/dev/null"],
+		memory_limit_mb: 256,
+		cpu_limit_percent: 25,
+	});
+	const operation = await client.awaitOperation(accepted.operation_id, {
+		timeoutMs: 120_000,
+	});
+	if (String(operation.status) !== "succeeded") {
+		throw new Error(
+			`container create operation failed: ${JSON.stringify(operation)}`,
+		);
+	}
+
+	const result =
+		(operation.result as Record<string, unknown> | undefined) ?? {};
+	const containerId =
+		typeof result.container_id === "string"
+			? result.container_id
+			: String((await client.containers.byName(name)).container_id ?? "");
+	assert(
+		containerId,
+		`container create for ${name} did not yield a container_id`,
+	);
+	return { containerId, name, operationId: accepted.operation_id };
+}
+
+async function deletePublicContainer(
+	client: QuiltClient,
+	containerId: string,
+): Promise<void> {
+	try {
+		const accepted = await client.containers.remove(containerId);
+		if (accepted.operation_id) {
+			await client.awaitOperation(accepted.operation_id, {
+				timeoutMs: 120_000,
+			});
+		}
+	} catch (error) {
+		if (
+			typeof error === "object" &&
+			error !== null &&
+			"status" in error &&
+			error.status === 404
+		) {
+			return;
+		}
+		throw error;
+	}
+}
+
+async function createTarGzBase64(
+	files: Array<{ path: string; content: string }>,
+): Promise<string> {
+	const root = await mkdtemp(join(tmpdir(), "quilt-demo-archive-"));
+	try {
+		for (const file of files) {
+			const target = join(root, file.path);
+			const dir = target.slice(0, Math.max(target.lastIndexOf("/"), 0));
+			if (dir) {
+				await mkdirRecursive(dir);
+			}
+			await writeFile(target, file.content, "utf8");
+		}
+
+		const tarball = join(root, "bundle.tar.gz");
+		await spawnOk("tar", [
+			"-czf",
+			tarball,
+			"-C",
+			root,
+			...files.map((file) => file.path),
+		]);
+		const data = await readFile(tarball);
+		return data.toString("base64");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+}
+
+async function mkdirRecursive(path: string): Promise<void> {
+	const { mkdir } = await import("node:fs/promises");
+	await mkdir(path, { recursive: true });
+}
+
+async function spawnOk(command: string, args: string[]): Promise<void> {
+	await new Promise<void>((resolve, reject) => {
+		const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+		let stderr = "";
+		child.stderr.on("data", (chunk) => {
+			stderr += String(chunk);
+		});
+		child.on("error", reject);
+		child.on("exit", (code) => {
+			if (code === 0) {
+				resolve();
+			} else {
+				reject(new Error(`${command} ${args.join(" ")} failed: ${stderr}`));
+			}
+		});
+	});
 }
 
 main().catch((error) => {

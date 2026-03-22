@@ -1,17 +1,12 @@
-import {
-	assert,
-	CleanupStack,
-	createClient,
-	createPublicContainer,
-	deletePublicContainer,
-	sleep,
-	suffix,
-} from "./lib.js";
+import { QuiltClient, type QuiltClientOptions } from "quilt-sdk";
+
+const BASE_URL = process.env.QUILT_BASE_URL ?? "https://backend.quilt.sh";
+const API_KEY = process.env.QUILT_API_KEY;
+const JWT = process.env.QUILT_JWT;
 
 async function main(): Promise<void> {
 	const cleanup = new CleanupStack();
 	const client = createClient();
-
 	const lines: string[] = [];
 
 	try {
@@ -21,9 +16,11 @@ async function main(): Promise<void> {
 		assert(Object.keys(info).length > 0, "SDK system info empty");
 		lines.push(`system.health=${String(health.status)}`);
 
-		const { containerId, name, operationId } =
-			await createPublicContainer("sdk-verify");
-		cleanup.defer(async () => deletePublicContainer(containerId));
+		const { containerId, name, operationId } = await createPublicContainer(
+			client,
+			"sdk-verify",
+		);
+		cleanup.defer(async () => deletePublicContainer(client, containerId));
 		lines.push(
 			`public create ok operation=${operationId} container=${containerId}`,
 		);
@@ -67,18 +64,14 @@ async function main(): Promise<void> {
 			!("SDK_KEEP" in envReplaced.environment),
 			"SDK env replace retained old key",
 		);
-		lines.push(`platform env patch/replace ok`);
+		lines.push("platform env patch/replace ok");
 
 		const execAccepted = (await client.containers.exec(containerId, {
 			command: ["sh", "-lc", "echo sdk-exec-ok"],
 			workdir: "/",
 			timeout_ms: 10_000,
 		})) as { job_id: string };
-		const execJob = await waitForSdkJob(
-			client,
-			containerId,
-			execAccepted.job_id,
-		);
+		const execJob = await waitForJob(client, containerId, execAccepted.job_id);
 		assert(String(execJob.status) === "completed", "SDK exec did not complete");
 		assert(
 			String(execJob.stdout ?? "").includes("sdk-exec-ok"),
@@ -204,7 +197,7 @@ async function main(): Promise<void> {
 			Object.keys(rawOps).length > 0,
 			"SDK raw request returned empty payload",
 		);
-		lines.push(`client.raw authenticated path ok`);
+		lines.push("client.raw authenticated path ok");
 	} finally {
 		await cleanup.run();
 	}
@@ -215,19 +208,59 @@ async function main(): Promise<void> {
 	}
 }
 
-async function waitForSdkJob(
-	client: ReturnType<typeof createClient>,
+function createClient(options: Partial<QuiltClientOptions> = {}): QuiltClient {
+	return QuiltClient.connect({
+		baseUrl: BASE_URL,
+		...(API_KEY ? { apiKey: API_KEY } : JWT ? { token: JWT } : {}),
+		...options,
+	});
+}
+
+class CleanupStack {
+	private readonly tasks: Array<() => Promise<void>> = [];
+
+	defer(task: () => Promise<void>): void {
+		this.tasks.push(task);
+	}
+
+	async run(): Promise<void> {
+		while (this.tasks.length > 0) {
+			const task = this.tasks.pop();
+			if (!task) {
+				continue;
+			}
+			try {
+				await task();
+			} catch (error) {
+				console.warn("[cleanup] task failed:", error);
+			}
+		}
+	}
+}
+
+function assert(condition: unknown, message: string): asserts condition {
+	if (!condition) {
+		throw new Error(message);
+	}
+}
+
+function suffix(prefix: string): string {
+	return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+}
+
+async function sleep(ms: number): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForJob(
+	client: QuiltClient,
 	containerId: string,
 	jobId: string,
 	timeoutMs = 60_000,
 ): Promise<Record<string, unknown>> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
-		const job = (await client.platform.getContainerJob(
-			containerId,
-			jobId,
-			true,
-		)) as Record<string, unknown>;
+		const job = await client.platform.getContainerJob(containerId, jobId, true);
 		const status = String(job.status ?? "");
 		if (["completed", "failed", "timed_out"].includes(status)) {
 			return job;
@@ -235,6 +268,64 @@ async function waitForSdkJob(
 		await sleep(250);
 	}
 	throw new Error(`SDK job ${jobId} did not complete within ${timeoutMs}ms`);
+}
+
+async function createPublicContainer(
+	client: QuiltClient,
+	namePrefix: string,
+): Promise<{ containerId: string; name: string; operationId: string }> {
+	const name = suffix(namePrefix);
+	const accepted = await client.containers.create({
+		name,
+		image: "prod",
+		command: ["tail", "-f", "/dev/null"],
+		memory_limit_mb: 256,
+		cpu_limit_percent: 25,
+	});
+	const operation = await client.awaitOperation(accepted.operation_id, {
+		timeoutMs: 120_000,
+	});
+	if (String(operation.status) !== "succeeded") {
+		throw new Error(
+			`container create operation failed: ${JSON.stringify(operation)}`,
+		);
+	}
+
+	const result =
+		(operation.result as Record<string, unknown> | undefined) ?? {};
+	const containerId =
+		typeof result.container_id === "string"
+			? result.container_id
+			: String((await client.containers.byName(name)).container_id ?? "");
+	assert(
+		containerId,
+		`container create for ${name} did not yield a container_id`,
+	);
+	return { containerId, name, operationId: accepted.operation_id };
+}
+
+async function deletePublicContainer(
+	client: QuiltClient,
+	containerId: string,
+): Promise<void> {
+	try {
+		const accepted = await client.containers.remove(containerId);
+		if (accepted.operation_id) {
+			await client.awaitOperation(accepted.operation_id, {
+				timeoutMs: 120_000,
+			});
+		}
+	} catch (error) {
+		if (
+			typeof error === "object" &&
+			error !== null &&
+			"status" in error &&
+			error.status === 404
+		) {
+			return;
+		}
+		throw error;
+	}
 }
 
 main().catch((error) => {

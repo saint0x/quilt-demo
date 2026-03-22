@@ -1,14 +1,10 @@
 import protobuf from "protobufjs";
+import { QuiltClient, type QuiltClientOptions } from "quilt-sdk";
 import WebSocket from "ws";
 
-import {
-	assert,
-	CleanupStack,
-	createClient,
-	createPublicContainer,
-	deletePublicContainer,
-	suffix,
-} from "./lib.js";
+const BASE_URL = process.env.QUILT_BASE_URL ?? "https://backend.quilt.sh";
+const API_KEY = process.env.QUILT_API_KEY;
+const JWT = process.env.QUILT_JWT;
 
 type EnvelopePayload = {
 	exec_command?: {
@@ -33,17 +29,11 @@ async function main(): Promise<void> {
 	const lines: string[] = [];
 
 	const { containerId, operationId } = await createPublicContainer(
+		client,
 		"interactive-example",
 	);
-	cleanup.defer(async () => deletePublicContainer(containerId));
+	cleanup.defer(async () => deletePublicContainer(client, containerId));
 	lines.push(`container created operation=${operationId} id=${containerId}`);
-
-	const container = (await client.containers.get(containerId)) as Record<
-		string,
-		unknown
-	>;
-	const tenantId = String(container.tenant_id ?? "");
-	assert(tenantId, "container tenant_id missing");
 
 	const root = await protobuf.load("/home/ubuntu/quilt-prod/proto/jets.proto");
 	const Envelope = root.lookupType("jets.Envelope");
@@ -130,9 +120,7 @@ async function main(): Promise<void> {
 	const execBroadcast = (await client.platform.iccExecBroadcast({
 		command: ["echo", "icc-broadcast-ok"],
 		timeout_ms: 10_000,
-		targets: {
-			container_ids: [containerId],
-		},
+		targets: { container_ids: [containerId] },
 	})) as Record<string, unknown>;
 	assert(
 		Number(execBroadcast.succeeded ?? 0) === 1,
@@ -155,9 +143,7 @@ async function main(): Promise<void> {
 
 	const listedSessions = (await client.terminal.listSessions({
 		target: "container",
-	})) as unknown as {
-		sessions: Array<Record<string, unknown>>;
-	};
+	})) as unknown as { sessions: Array<Record<string, unknown>> };
 	const fetchedSession = (await client.terminal.getSession(
 		sessionId,
 	)) as unknown as Record<string, unknown>;
@@ -192,8 +178,105 @@ async function main(): Promise<void> {
 	}
 }
 
+function createClient(options: Partial<QuiltClientOptions> = {}): QuiltClient {
+	return QuiltClient.connect({
+		baseUrl: BASE_URL,
+		...(API_KEY ? { apiKey: API_KEY } : JWT ? { token: JWT } : {}),
+		...options,
+	});
+}
+
+class CleanupStack {
+	private readonly tasks: Array<() => Promise<void>> = [];
+
+	defer(task: () => Promise<void>): void {
+		this.tasks.push(task);
+	}
+
+	async run(): Promise<void> {
+		while (this.tasks.length > 0) {
+			const task = this.tasks.pop();
+			if (!task) {
+				continue;
+			}
+			try {
+				await task();
+			} catch (error) {
+				console.warn("[cleanup] task failed:", error);
+			}
+		}
+	}
+}
+
+function assert(condition: unknown, message: string): asserts condition {
+	if (!condition) {
+		throw new Error(message);
+	}
+}
+
+function suffix(prefix: string): string {
+	return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+}
+
+async function createPublicContainer(
+	client: QuiltClient,
+	namePrefix: string,
+): Promise<{ containerId: string; operationId: string }> {
+	const name = suffix(namePrefix);
+	const accepted = await client.containers.create({
+		name,
+		image: "prod",
+		command: ["tail", "-f", "/dev/null"],
+		memory_limit_mb: 256,
+		cpu_limit_percent: 25,
+	});
+	const operation = await client.awaitOperation(accepted.operation_id, {
+		timeoutMs: 120_000,
+	});
+	if (String(operation.status) !== "succeeded") {
+		throw new Error(
+			`container create operation failed: ${JSON.stringify(operation)}`,
+		);
+	}
+	const result =
+		(operation.result as Record<string, unknown> | undefined) ?? {};
+	const containerId =
+		typeof result.container_id === "string"
+			? result.container_id
+			: String((await client.containers.byName(name)).container_id ?? "");
+	assert(
+		containerId,
+		`container create for ${name} did not yield a container_id`,
+	);
+	return { containerId, operationId: accepted.operation_id };
+}
+
+async function deletePublicContainer(
+	client: QuiltClient,
+	containerId: string,
+): Promise<void> {
+	try {
+		const accepted = await client.containers.remove(containerId);
+		if (accepted.operation_id) {
+			await client.awaitOperation(accepted.operation_id, {
+				timeoutMs: 120_000,
+			});
+		}
+	} catch (error) {
+		if (
+			typeof error === "object" &&
+			error !== null &&
+			"status" in error &&
+			error.status === 404
+		) {
+			return;
+		}
+		throw error;
+	}
+}
+
 async function verifyTerminalWebSocket(
-	client: ReturnType<typeof createClient>,
+	client: QuiltClient,
 	sessionId: string,
 ): Promise<string> {
 	return await new Promise<string>((resolve, reject) => {

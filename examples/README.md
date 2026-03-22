@@ -196,19 +196,6 @@ Primary SDK surfaces:
 - `client.functions`
 - `client.raw(...)`
 
-### `lib.ts`
-
-This file is shared example support code.
-
-It is intentionally limited to:
-
-- authenticated SDK client construction
-- polling helpers for operations, jobs, and container state
-- cleanup utilities
-- archive bundle creation for upload examples
-
-It is not a second API client and it does not bypass the SDK.
-
 ## Higher-Level Guidance
 
 Use the typed module surfaces first.

@@ -1,4 +1,8 @@
-import { assert, CleanupStack, createClient, suffix } from "./lib.js";
+import { QuiltClient, type QuiltClientOptions } from "quilt-sdk";
+
+const BASE_URL = process.env.QUILT_BASE_URL ?? "https://backend.quilt.sh";
+const API_KEY = process.env.QUILT_API_KEY;
+const JWT = process.env.QUILT_JWT;
 
 type ClusterResponse = {
 	id: string;
@@ -260,9 +264,7 @@ async function main(): Promise<void> {
 		].join("\n");
 
 		const validate = (await client.raw("post", "/api/k8s/validate", {
-			body: {
-				manifest,
-			},
+			body: { manifest },
 		})) as Record<string, unknown>;
 		const diff = (await client.raw("post", "/api/k8s/diff", {
 			body: {
@@ -307,6 +309,46 @@ async function main(): Promise<void> {
 	for (const line of lines) {
 		console.log(`- ${line}`);
 	}
+}
+
+function createClient(options: Partial<QuiltClientOptions> = {}): QuiltClient {
+	return QuiltClient.connect({
+		baseUrl: BASE_URL,
+		...(API_KEY ? { apiKey: API_KEY } : JWT ? { token: JWT } : {}),
+		...options,
+	});
+}
+
+class CleanupStack {
+	private readonly tasks: Array<() => Promise<void>> = [];
+
+	defer(task: () => Promise<void>): void {
+		this.tasks.push(task);
+	}
+
+	async run(): Promise<void> {
+		while (this.tasks.length > 0) {
+			const task = this.tasks.pop();
+			if (!task) {
+				continue;
+			}
+			try {
+				await task();
+			} catch (error) {
+				console.warn("[cleanup] task failed:", error);
+			}
+		}
+	}
+}
+
+function assert(condition: unknown, message: string): asserts condition {
+	if (!condition) {
+		throw new Error(message);
+	}
+}
+
+function suffix(prefix: string): string {
+	return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 }
 
 main().catch((error) => {
