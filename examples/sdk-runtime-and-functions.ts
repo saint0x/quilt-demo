@@ -1,4 +1,4 @@
-import { QuiltClient, type QuiltClientOptions } from "quilt-sdk";
+import { QuiltClient } from "quilt-sdk";
 
 const BASE_URL = process.env.QUILT_BASE_URL ?? "https://backend.quilt.sh";
 const API_KEY = process.env.QUILT_API_KEY;
@@ -208,7 +208,7 @@ async function main(): Promise<void> {
 	}
 }
 
-function createClient(options: Partial<QuiltClientOptions> = {}): QuiltClient {
+function createClient(options: Partial<QuiltClient.Options> = {}): QuiltClient {
 	return QuiltClient.connect({
 		baseUrl: BASE_URL,
 		...(API_KEY ? { apiKey: API_KEY } : JWT ? { token: JWT } : {}),
