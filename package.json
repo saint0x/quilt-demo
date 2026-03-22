@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "examples:all": "npm run example:containers && npm run example:sdk && npm run example:clusters && npm run example:terminal && npm run example:elasticity && npm run example:lifecycle",
     "example:containers": "node --env-file=.env --import tsx examples/containers-volumes-and-network.ts",
     "example:sdk": "node --env-file=.env --import tsx examples/sdk-runtime-and-functions.ts",
@@ -12,12 +13,14 @@
     "example:lifecycle": "node --env-file=.env --import tsx examples/lifecycle-and-failures.ts"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.1",
     "tsx": "^4.20.3",
     "typescript": "^5.9.2"
   },
   "dependencies": {
+    "eventsource": "^3.0.7",
     "protobufjs": "^8.0.0",
-    "quilt-sdk": "^0.0.2",
+    "quilt-sdk": "^0.0.3",
     "ws": "^8.20.0"
   }
 }
