@@ -123,6 +123,46 @@ Notes:
 - `strict` is a boolean when supplied
 - create is async-oriented and should be treated as operation-driven
 
+### Docker Compatibility
+
+Quilt supports Docker-compatible image ingress through OCI registry pulls and OCI-backed container create.
+
+Primary image routes:
+
+```text
+POST   /api/oci/images/pull
+GET    /api/oci/images
+GET    /api/oci/images/inspect?reference=<ref>
+GET    /api/oci/images/history?reference=<ref>
+DELETE /api/oci/images?reference=<ref>
+```
+
+Important semantics:
+
+- Quilt accepts Docker/OCI registry references such as `nginx`, `docker.io/library/alpine:3.20`, or `ghcr.io/owner/image:tag`
+- this is image compatibility, not Docker Engine API compatibility
+- after pulling an OCI image, create the container through normal container create with `oci: true`
+- image metadata such as env, entrypoint/cmd, and working directory come from the pulled image config unless explicitly overridden
+
+Image pull request:
+
+```json
+{
+  "reference": "docker.io/library/alpine:3.20"
+}
+```
+
+Create from pulled image:
+
+```json
+{
+  "name": "oci-demo",
+  "image": "docker.io/library/alpine:3.20",
+  "oci": true,
+  "command": ["sleep", "60"]
+}
+```
+
 Batch create route:
 
 ```text
