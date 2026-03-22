@@ -3,10 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "verify:all": "node --env-file=.env --import tsx scripts/verify-http.ts && node --env-file=.env --import tsx scripts/verify-sdk.ts && node --env-file=.env --import tsx scripts/verify-control-plane.ts && node --env-file=.env --import tsx scripts/verify-interactive.ts",
+    "verify:all": "node --env-file=.env --import tsx scripts/verify-http.ts && node --env-file=.env --import tsx scripts/verify-sdk.ts && node --env-file=.env --import tsx scripts/verify-control-plane.ts && node --env-file=.env --import tsx scripts/verify-interactive.ts && node --env-file=.env --import tsx scripts/verify-lifecycle.ts",
     "verify:control-plane": "node --env-file=.env --import tsx scripts/verify-control-plane.ts",
     "verify:http": "node --env-file=.env --import tsx scripts/verify-http.ts",
     "verify:interactive": "node --env-file=.env --import tsx scripts/verify-interactive.ts",
+    "verify:lifecycle": "node --env-file=.env --import tsx scripts/verify-lifecycle.ts",
     "verify:sdk": "node --env-file=.env --import tsx scripts/verify-sdk.ts"
   },
   "devDependencies": {

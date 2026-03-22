@@ -147,32 +147,21 @@ Primary route:
 POST /api/containers/<container_id>/exec
 ```
 
-String command form:
+Exec request shape:
 
 ```json
 {
-  "command": "npm test",
-  "capture_output": true,
-  "detach": false,
+  "command": ["npm", "test"],
   "workdir": "/app",
   "timeout_ms": 30000
 }
 ```
 
-Base64 command form:
+Important semantics:
 
-```json
-{
-  "command": {
-    "cmd_b64": "<base64>"
-  },
-  "capture_output": true,
-  "detach": false,
-  "timeout_ms": 30000
-}
-```
-
-Use the base64 form when quoting, newlines, or escaping would make the plain string form brittle.
+- `command` is argv-only and must be a JSON array of strings
+- exec is submit-and-track; the route returns a job handle immediately
+- shell behavior is explicit, not implied: if shell parsing is required, invoke `["/bin/sh", "-lc", "..."]` or another interpreter directly
 
 Exec job inspection routes:
 
@@ -580,7 +569,7 @@ Behavior notes:
 - If the platform may be down, check `GET /health` first.
 - If the task is about a specific runtime, resolve the container and check readiness before mutating it.
 - If a mutation is async, track the operation instead of issuing duplicate requests.
-- If command quoting is risky, use the base64 exec contract.
+- If shell parsing is required, invoke the shell explicitly in argv form.
 - If state must persist across container replacement, use volumes.
 - If state must be reproducible, snapshot first and clone from that snapshot.
 - If diagnosing connectivity, inspect container network diagnostics before changing routes or IP assignments.

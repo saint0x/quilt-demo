@@ -152,6 +152,61 @@ export async function waitForJob(
   throw new Error(`job ${jobId} did not complete within ${timeoutMs}ms`);
 }
 
+export async function waitForContainerState(
+  containerId: string,
+  expectedStates: string[],
+  timeoutMs = 60_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const container = await requestOk<Record<string, unknown>>("GET", `/api/containers/${containerId}`);
+    const state = String(container.state ?? "");
+    if (expectedStates.includes(state)) {
+      return container;
+    }
+    await sleep(250);
+  }
+  throw new Error(
+    `container ${containerId} did not reach one of [${expectedStates.join(", ")}] within ${timeoutMs}ms`,
+  );
+}
+
+export async function requestUnauthed(
+  method: string,
+  path: string,
+  options?: {
+    body?: unknown;
+    query?: Record<string, string | number | boolean | undefined>;
+    headers?: Record<string, string>;
+    signal?: AbortSignal;
+  },
+): Promise<{ status: number; data: unknown; headers: Headers }> {
+  const url = new URL(path, BASE_URL);
+  for (const [key, value] of Object.entries(options?.query ?? {})) {
+    if (value === undefined) {
+      continue;
+    }
+    url.searchParams.set(key, String(value));
+  }
+
+  const hasJsonBody = options?.body !== undefined;
+  const response = await fetch(url, {
+    method,
+    headers: {
+      Accept: "application/json",
+      ...(hasJsonBody ? { "Content-Type": "application/json" } : {}),
+      ...(options?.headers ?? {}),
+    },
+    body: hasJsonBody ? JSON.stringify(options.body) : undefined,
+    signal: options?.signal,
+  });
+
+  const text = await response.text();
+  const contentType = response.headers.get("content-type") ?? "";
+  const data = contentType.includes("application/json") ? JSON.parse(text || "null") : text;
+  return { status: response.status, data, headers: response.headers };
+}
+
 export async function readFirstSseEvent(timeoutMs = 5_000): Promise<string> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
