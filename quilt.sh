@@ -12,6 +12,10 @@
 #   QUILT_TOKEN             JWT auth token (optional)
 #   QUILT_API_KEY           API key (optional)
 #   QUILT_AUTH_MODE         auto|token|api-key (default: auto)
+#   For route-family discovery, use:
+#     GET /api/<concern>/help
+#     GET /api/<concern>/examples
+#     GET /api/<concern>/health
 #
 # Examples:
 #   export QUILT_API_KEY="quilt_sk_..."

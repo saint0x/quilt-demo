@@ -50,6 +50,16 @@ GET /api/system/info
 
 Agent rule: confirm platform health before diagnosing higher-level failures.
 
+## Concern Guides
+
+The backend exposes concern-scoped discovery endpoints for major API families. Use:
+
+- `GET /api/<concern>/help`
+- `GET /api/<concern>/examples`
+- `GET /api/<concern>/health`
+
+Use them for route-family discovery, canonical payloads, and concern-scoped readiness. Default format is JSON; `?format=markdown` or `Accept: text/markdown` returns Markdown.
+
 ## Core Resource Model
 
 Think in terms of stable resources:
