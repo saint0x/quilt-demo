@@ -63,15 +63,16 @@
 #
 #   Typical flow:
 #     1) Create a prod-gui container.
-#     2) Optionally launch GUI apps on the X display:
-#          ./quilt.sh exec <container_id> "apt-get update && apt-get install -y x11-apps && DISPLAY=:1 xeyes & DISPLAY=:1 xclock &"
+#     2) Launch GUI apps through qgui instead of wiring DISPLAY/DBus manually:
+#          ./quilt.sh exec <container_id> "apt-get update && apt-get install -y x11-apps && qgui run -- xeyes"
 #     3) Get signed GUI URL:
 #          curl -sS -H "X-Api-Key: $QUILT_API_KEY" \
 #            "$QUILT_API_URL/api/containers/<container_id>/gui-url"
 #        Open returned `gui_url` in browser immediately.
 #
 #   Notes:
-#     - `qgui status` shows xvfb/vnc/websockify health.
+#     - `qgui status` shows the managed session contract plus component health.
+#     - `qgui env` prints the exact session variables used by GUI apps.
 #     - `/gui/<id>/` may return 401 directly; use signed `gui_url` for API-key flows.
 #     - Open the returned signed `gui_url` verbatim. Quilt serves noVNC under
 #       `/gui/<id>/...` and rewrites the browser websocket target to the
@@ -2008,11 +2009,14 @@ GUI WORKLOADS (QGUI):
     Run GUI apps inside a container and access them in browser:
       Use the managed prod-gui image. It starts the GUI stack automatically.
       If your current container is non-GUI, create a new container using image prod-gui first.
-      1) ./quilt.sh exec <id> "apt-get update && apt-get install -y x11-apps && DISPLAY=:1 xeyes & DISPLAY=:1 xclock &"
+      1) ./quilt.sh exec <id> "apt-get update && apt-get install -y x11-apps && qgui run -- xeyes"
       2) curl -sS -H "X-Api-Key: $QUILT_API_KEY" \
            "$QUILT_API_URL/api/containers/<id>/gui-url"
          Open returned gui_url immediately.
-    Note: direct /gui/<id>/ may return 401 in API-key flows; use the signed gui_url endpoint.
+    Notes:
+      qgui status shows the managed session contract plus component health.
+      qgui env prints the session variables for GUI apps.
+      direct /gui/<id>/ may return 401 in API-key flows; use the signed gui_url endpoint.
 
 SYSTEM:
     health                       Check API health (no auth required)

@@ -667,6 +667,7 @@ Notes:
 - `prod-gui` starts the GUI stack automatically.
 - `prod-gui` does not accept a custom `command`; the GUI supervisor is the canonical container command.
 - `prod-gui` is Ubuntu-based and includes `apt`, XFCE/noVNC, Rust/Cargo/CMake, and native X11/GTK build dependencies.
+- Inside a running GUI container, `qgui env` prints the managed session variables and `qgui run -- <command...>` launches desktop apps without manual `DISPLAY` or DBus wiring.
 - The signed `gui_url` lands on Quilt's container-scoped noVNC proxy under `/gui/<container_id>/...`.
 - Quilt rewrites the served noVNC entrypoint so browser assets and the VNC websocket stay container-scoped at `gui/<container_id>/websockify`.
 - Use the signed `gui_url` as returned; do not rewrite the path or point the browser at `/websockify` directly.
