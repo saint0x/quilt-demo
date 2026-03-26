@@ -22,6 +22,7 @@ Use this guide when working with:
 - join tokens
 - Kubernetes-style manifest workflows
 - serverless functions
+- GPU passthrough
 
 ## Authentication
 
@@ -189,6 +190,37 @@ Batch payload contract:
   ]
 }
 ```
+
+## GPU Passthrough
+
+GPU support is an explicit platform contract, not a raw mount workaround.
+
+Use GPU passthrough when:
+
+- creating containers that need NVIDIA device access
+- creating workloads that must land on GPU-capable nodes
+- reporting node GPU inventory during agent register/heartbeat
+- debugging why a workload did or did not receive a GPU assignment
+
+Container create shape:
+
+```json
+{
+  "name": "gpu-demo",
+  "image": "prod",
+  "gpu_count": 1,
+  "gpu_ids": ["nvidia0"],
+  "command": ["/bin/sh", "-lc", "nvidia-smi"]
+}
+```
+
+Important semantics:
+
+- raw `/dev/nvidia*` bind mounts remain blocked
+- `gpu_count` is the primary request field
+- `gpu_ids` is optional explicit pinning and must match `gpu_count` when used
+- node GPU inventory is agent-reported control-plane state
+- scheduler placement must satisfy GPU inventory before assigning a workload
 
 ## Elasticity
 

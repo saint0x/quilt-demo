@@ -75,6 +75,21 @@
 #   Notes:
 #     - `qgui status` shows xvfb/vnc/websockify health.
 #     - `/gui/<id>/` may return 401 directly; use signed `gui_url` for API-key flows.
+#
+# GPU Workloads in Containers (Optional):
+#   Quilt exposes GPU support as first-class API fields, not as raw `/dev/nvidia*` bind mounts.
+#   Use this when the target tenant plan and node inventory support NVIDIA GPUs.
+#
+#   Typical flow:
+#     1) Create a GPU-backed container:
+#          ./quilt.sh create gpu-demo --gpu-count=1 --gpu-id=nvidia0 -- nvidia-smi
+#     2) Or let Quilt auto-assign one available GPU:
+#          ./quilt.sh create gpu-demo --gpu-count=1 -- /bin/sh -lc 'nvidia-smi && tail -f /dev/null'
+#
+#   Notes:
+#     - `--gpu-id` is repeatable.
+#     - When explicit IDs are supplied, they must exactly match `--gpu-count`.
+#     - Raw host `/dev/nvidia*` mounts remain blocked by backend policy.
 # =============================================================================
 
 set -euo pipefail
@@ -684,6 +699,8 @@ cmd_create() {
     local workdir=""
     local memory_mb=""
     local cpu_percent=""
+    local gpu_count=""
+    local gpu_ids=()
     local strict=""
     local env_pairs=()
     local cmd_args=()
@@ -730,6 +747,28 @@ cmd_create() {
             --cpu=*)
                 cpu_percent="${1#*=}"
                 [[ "$cpu_percent" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "create --cpu must be numeric"
+                shift
+                ;;
+            --gpu-count)
+                gpu_count="${2:-}"
+                [[ "$gpu_count" =~ ^[0-9]+$ ]] || die "create --gpu-count must be an integer"
+                shift 2
+                ;;
+            --gpu-count=*)
+                gpu_count="${1#*=}"
+                [[ "$gpu_count" =~ ^[0-9]+$ ]] || die "create --gpu-count must be an integer"
+                shift
+                ;;
+            --gpu-id)
+                local gpu_id="${2:-}"
+                [[ -n "$gpu_id" ]] || die "create --gpu-id requires a value"
+                gpu_ids+=("$gpu_id")
+                shift 2
+                ;;
+            --gpu-id=*)
+                local gpu_id="${1#*=}"
+                [[ -n "$gpu_id" ]] || die "create --gpu-id requires a value"
+                gpu_ids+=("$gpu_id")
                 shift
                 ;;
             --strict)
@@ -792,6 +831,17 @@ cmd_create() {
     fi
     if [[ -n "$cpu_percent" ]]; then
         payload="$payload,\"cpu_limit_percent\":$cpu_percent"
+    fi
+    if [[ -n "$gpu_count" ]]; then
+        payload="$payload,\"gpu_count\":$gpu_count"
+    fi
+    if [[ ${#gpu_ids[@]} -gt 0 ]]; then
+        local gpu_json="" gpu_id
+        for gpu_id in "${gpu_ids[@]}"; do
+            [[ -n "$gpu_json" ]] && gpu_json="$gpu_json,"
+            gpu_json="$gpu_json\"$(json_escape "$gpu_id")\""
+        done
+        payload="$payload,\"gpu_ids\":[$gpu_json]"
     fi
     if [[ -n "$strict" ]]; then
         payload="$payload,\"strict\":$strict"
@@ -1952,6 +2002,8 @@ CONTAINERS:
                                    --env K=V         Repeatable
                                    --memory-mb=<int>
                                    --cpu=<percent>
+                                   --gpu-count=<int>
+                                   --gpu-id=<id>    Repeatable explicit NVIDIA device ID
                                    --strict|--no-strict
     create-batch --file <batch.json>
                                  Batch create containers
