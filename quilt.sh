@@ -73,6 +73,9 @@
 #   Notes:
 #     - `qgui status` shows xvfb/vnc/websockify health.
 #     - `/gui/<id>/` may return 401 directly; use signed `gui_url` for API-key flows.
+#     - Open the returned signed `gui_url` verbatim. Quilt serves noVNC under
+#       `/gui/<id>/...` and rewrites the browser websocket target to the
+#       container-scoped `gui/<id>/websockify` route automatically.
 #
 # GPU Workloads in Containers (Optional):
 #   Quilt exposes GPU support as first-class API fields, not as raw `/dev/nvidia*` bind mounts.
