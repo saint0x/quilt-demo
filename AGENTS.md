@@ -820,8 +820,10 @@ Important semantics:
 
 - create returns a pending function record and starts the versioned lifecycle
 - update creates a new version rather than mutating the active version in place
-- `deploy` warms capacity and `pause` scales the function to zero
+- `deploy` warms and starts capacity; `ready_count` only reflects containers that are already started and invocable
+- `pause` scales the function to zero
 - `resume` makes a paused function eligible for execution again
+- GET/list function routes are read-only; owner reassignment happens on control-plane or mutating execution paths, not on reads
 - `owner_node_id` is the node responsible for deployment and warm-pool reconciliation
 - `execution_node_id` is the node that actually ran the invocation
 - `cold_start` should be treated as execution metadata, not as an error condition
