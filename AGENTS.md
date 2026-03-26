@@ -369,6 +369,24 @@ DELETE /api/containers/<container_id>/processes/<pid>?signal=<signal>
 ```
 
 Agent rule: exec is always job-driven. Submit the command, then inspect the job record for completion and output.
+Exec submission requires an exec-ready container with a protocol-compatible `minit` control socket.
+
+Exec job poll response:
+
+```json
+{
+  "job_id": "job_123",
+  "container_id": "ctr_123",
+  "command": "/bin/sh -lc npm test",
+  "status": "failed",
+  "exit_code": null,
+  "started_at": 1760000000,
+  "completed_at": 1760000001,
+  "error_message": "Failed to connect to minit socket /var/lib/quilt/containers/ctr_123/run/minit.sock: No such file or directory",
+  "stdout": "",
+  "stderr": "Failed to connect to minit socket /var/lib/quilt/containers/ctr_123/run/minit.sock: No such file or directory"
+}
+```
 
 ## Operations
 
@@ -619,7 +637,7 @@ Primary route:
 GET /api/containers/<container_id>/gui-url
 ```
 
-Use GUI access only for GUI-capable containers. The signed URL route only succeeds when the container is running, network-ready, and serving the GUI backend.
+Use GUI access only for `prod-gui` containers. The signed URL route only succeeds when the container is running, network-ready, and serving the GUI backend.
 
 GUI-capable container create shape:
 
@@ -634,16 +652,20 @@ GUI-capable container create shape:
   "strict": true,
   "environment": {
     "FOO": "bar"
-  },
-  "command": ["/bin/sh", "-c", "echo hello"]
+  }
 }
 ```
 
 Typical GUI flow:
 
 1. Create a container from a GUI-capable image such as `prod-gui`.
-2. Start the GUI stack inside the container.
+2. Wait for the container to become ready.
 3. Request the signed GUI URL for that container.
+
+Notes:
+
+- `prod-gui` starts the GUI stack automatically.
+- `prod-gui` does not accept a custom `command`; the GUI supervisor is the canonical container command.
 
 ## ICC
 
