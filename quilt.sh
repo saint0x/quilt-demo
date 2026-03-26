@@ -388,6 +388,64 @@ extract_operation_id() {
     printf '%s' "$operation_id"
 }
 
+extract_job_id() {
+    local response="$1"
+    local job_id=""
+
+    if have_cmd jq; then
+        job_id=$(echo "$response" | jq -r '.job_id // empty')
+    else
+        job_id=$(echo "$response" | json_get_string_best_effort "job_id")
+    fi
+
+    printf '%s' "$job_id"
+}
+
+extract_job_status_url() {
+    local response="$1"
+    local status_url=""
+
+    if have_cmd jq; then
+        status_url=$(echo "$response" | jq -r '.status_url // empty')
+    else
+        status_url=$(echo "$response" | json_get_string_best_effort "status_url")
+    fi
+
+    printf '%s' "$status_url"
+}
+
+wait_for_exec_job() {
+    local container_id="$1"
+    local job_id="$2"
+    local poll_interval_s="${3:-1}"
+
+    [[ -n "$container_id" && -n "$job_id" ]] || die "wait_for_exec_job requires container_id and job_id"
+    have_cmd jq || die "Waiting for exec jobs requires jq."
+
+    while true; do
+        local response status
+        response=$(api_request GET "/api/containers/$container_id/jobs/$job_id?include_output=true")
+        status=$(echo "$response" | jq -r '.status // empty')
+        case "$status" in
+            completed)
+                echo "$response" | pretty_json
+                return 0
+                ;;
+            failed|timeout)
+                echo "$response" | pretty_json
+                return 1
+                ;;
+            running)
+                sleep "$poll_interval_s"
+                ;;
+            *)
+                echo "$response" | pretty_json
+                return 1
+                ;;
+        esac
+    done
+}
+
 wait_for_operation_event() {
     local operation_id="$1"
     local timeout_ms="${2:-300000}"
@@ -528,29 +586,27 @@ cmd_exec() {
     shift || true
 
     local timeout_ms=""
-    local detach=false
+    local wait_for_job=false
     local workdir=""
-    local capture_output=true
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --timeout=*) timeout_ms="${1#*=}"; shift ;;
-            --detach) detach=true; shift ;;
+            --wait) wait_for_job=true; shift ;;
             --workdir=*) workdir="${1#*=}"; shift ;;
-            --no-capture) capture_output=false; shift ;;
             --) shift; break ;;
             *) break ;;
         esac
     done
 
     local command="$*"
-    [[ -n "$container_id" ]] || die "Usage: $0 exec <container_id> [--timeout=<ms>] [--detach] [--workdir=<path>] [--no-capture] <command>"
-    [[ -n "$command" ]] || die "Usage: $0 exec <container_id> [--timeout=<ms>] [--detach] [--workdir=<path>] [--no-capture] <command>"
+    [[ -n "$container_id" ]] || die "Usage: $0 exec <container_id> [--timeout=<ms>] [--wait] [--workdir=<path>] <command>"
+    [[ -n "$command" ]] || die "Usage: $0 exec <container_id> [--timeout=<ms>] [--wait] [--workdir=<path>] <command>"
 
     log_info "Executing in container $container_id: $command"
 
     local payload
-    payload="{\"command\":\"$(json_escape "$command")\",\"capture_output\":$capture_output,\"detach\":$detach"
+    payload="{\"command\":[\"/bin/sh\",\"-lc\",\"$(json_escape "$command")\"]"
     if [[ -n "$workdir" ]]; then
         payload="$payload,\"workdir\":\"$(json_escape "$workdir")\""
     fi
@@ -559,36 +615,17 @@ cmd_exec() {
     fi
     payload="$payload}"
 
-    api_request POST "/api/containers/$container_id/exec" "$payload" | pretty_json
-}
+    api_request_with_status POST "/api/containers/$container_id/exec" "$payload"
+    [[ "$API_STATUS" == "202" ]] || die "Expected HTTP 202 for exec, got $API_STATUS"
 
-cmd_exec_b64() {
-    local container_id="${1:-}"
-    shift || true
-
-    local timeout_ms=""
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --timeout=*) timeout_ms="${1#*=}"; shift ;;
-            --) shift; break ;;
-            *) break ;;
-        esac
-    done
-
-    local command="$*"
-    [[ -n "$container_id" ]] || die "Usage: $0 exec-b64 <container_id> [--timeout=<ms>] <command>"
-    [[ -n "$command" ]] || die "Usage: $0 exec-b64 <container_id> [--timeout=<ms>] <command>"
-
-    local encoded payload
-    encoded=$(b64_string "$command")
-    payload="{\"command\":{\"cmd_b64\":\"$encoded\"},\"capture_output\":true,\"detach\":false"
-    if [[ -n "$timeout_ms" ]]; then
-        payload="$payload,\"timeout_ms\":$timeout_ms"
+    if [[ "$wait_for_job" == "true" ]]; then
+        local job_id
+        job_id=$(extract_job_id "$API_RESPONSE")
+        [[ -n "$job_id" ]] || die "Exec response did not include job_id."
+        wait_for_exec_job "$container_id" "$job_id"
+    else
+        echo "$API_RESPONSE" | pretty_json
     fi
-    payload="$payload}"
-
-    log_info "Executing (b64) in container $container_id"
-    api_request POST "/api/containers/$container_id/exec" "$payload" | pretty_json
 }
 
 cmd_logs() {
@@ -608,22 +645,20 @@ cmd_gui_url() {
 
 cmd_start() {
     local container_id="${1:-}"
-    shift || true
     [[ -n "$container_id" ]] || die "Usage: $0 start <container_id>"
 
-    if [[ $# -gt 0 ]]; then
-        log_warn "start no longer supports async flags; ignoring extra arguments: $*"
-    fi
-
     log_info "Starting container $container_id..."
-    api_request POST "/api/containers/$container_id/start" | pretty_json
+    api_request_with_status POST "/api/containers/$container_id/start"
+    [[ "$API_STATUS" == "202" ]] || die "Expected HTTP 202 for start, got $API_STATUS"
+    print_async_hint_if_present "$API_RESPONSE"
+    await_operation_from_response "$API_RESPONSE"
 }
 
 cmd_stop() {
     local container_id="${1:-}"
     [[ -n "$container_id" ]] || die "Usage: $0 stop <container_id>"
 
-    local endpoint="/api/containers/$container_id/stop?execution=async"
+    local endpoint="/api/containers/$container_id/stop"
     log_info "Stopping container $container_id (operation-driven)..."
     api_request_with_status POST "$endpoint"
     [[ "$API_STATUS" == "202" ]] || die "Expected HTTP 202 for stop, got $API_STATUS"
@@ -643,7 +678,7 @@ cmd_rm() {
     local container_id="${1:-}"
     [[ -n "$container_id" ]] || die "Usage: $0 rm <container_id>"
 
-    local endpoint="/api/containers/$container_id?execution=async"
+    local endpoint="/api/containers/$container_id"
     log_info "Deleting container $container_id (operation-driven)..."
     api_request_with_status DELETE "$endpoint"
     [[ "$API_STATUS" == "202" ]] || die "Expected HTTP 202 for delete, got $API_STATUS"
@@ -814,7 +849,7 @@ cmd_create() {
     log_info "Creating container '$name' (operation-driven)..."
 
     local payload endpoint
-    endpoint="/api/containers?execution=async"
+    endpoint="/api/containers"
 
     payload="{\"name\":\"$(json_escape "$name")\""
     if [[ -n "$image" ]]; then
@@ -899,7 +934,7 @@ cmd_create_batch() {
         die "Batch payload must include non-empty .items array"
     fi
 
-    endpoint="/api/containers/batch?execution=async"
+    endpoint="/api/containers/batch"
 
     log_info "Creating batch containers from $batch_file (operation-driven)..."
     api_request_with_status POST "$endpoint" "$payload"
@@ -913,7 +948,7 @@ cmd_resume() {
     local container_id="${1:-}"
     [[ -n "$container_id" ]] || die "Usage: $0 resume <container_id>"
 
-    local endpoint="/api/containers/$container_id/resume?execution=async"
+    local endpoint="/api/containers/$container_id/resume"
     log_info "Resuming container $container_id (operation-driven)..."
     api_request_with_status POST "$endpoint"
 
@@ -939,7 +974,7 @@ cmd_fork() {
 
     local payload endpoint
     payload="{}"
-    endpoint="/api/containers/$container_id/fork?execution=async"
+    endpoint="/api/containers/$container_id/fork"
     if [[ -n "$new_name" ]]; then
         payload="{\"name\":\"$(json_escape "$new_name")\"}"
     fi
@@ -969,7 +1004,7 @@ cmd_clone() {
 
     local payload endpoint
     payload="{}"
-    endpoint="/api/snapshots/$snapshot_id/clone?execution=async"
+    endpoint="/api/snapshots/$snapshot_id/clone"
     if [[ -n "$name" ]]; then
         payload="{\"name\":\"$(json_escape "$name")\"}"
     fi
@@ -1210,7 +1245,7 @@ cmd_volume_delete() {
     [[ -n "$name" ]] || die "Usage: $0 volume-delete <name>"
 
     log_info "Deleting volume '$name' (operation-driven)..."
-    api_request_with_status DELETE "/api/volumes/$name?execution=async"
+    api_request_with_status DELETE "/api/volumes/$name"
     [[ "$API_STATUS" == "202" ]] || die "Expected HTTP 202 for volume-delete, got $API_STATUS"
     print_async_hint_if_present "$API_RESPONSE"
     await_operation_from_response "$API_RESPONSE"
@@ -1622,9 +1657,7 @@ cmd_icc_broadcast() {
 
 cmd_icc_exec_broadcast() {
     local timeout_ms=""
-    local detach=false
     local workdir=""
-    local capture_output=true
     local container_ids=""
     local include_non_running=""
     local limit=""
@@ -1632,9 +1665,7 @@ cmd_icc_exec_broadcast() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --timeout=*) timeout_ms="${1#*=}"; shift ;;
-            --detach) detach=true; shift ;;
             --workdir=*) workdir="${1#*=}"; shift ;;
-            --no-capture) capture_output=false; shift ;;
             --container-ids=*) container_ids="${1#*=}"; shift ;;
             --container-ids)
                 container_ids="${2:-}"
@@ -1661,7 +1692,7 @@ cmd_icc_exec_broadcast() {
     [[ -n "$command" ]] || die "Usage: $0 icc-exec-broadcast [target opts] [exec opts] -- <command>"
 
     local payload targets_json
-    payload="{\"command\":\"$(json_escape "$command")\",\"capture_output\":$capture_output,\"detach\":$detach"
+    payload="{\"command\":[\"/bin/sh\",\"-lc\",\"$(json_escape "$command")\"]"
     if [[ -n "$workdir" ]]; then
         payload="$payload,\"workdir\":\"$(json_escape "$workdir")\""
     fi
@@ -2031,19 +2062,14 @@ CONTAINERS:
     exec <id> [opts] <cmd>       Execute command in container
                                  opts:
                                    --timeout=<ms>   Default 300000, max 600000
-                                   --detach         Run async (check with jobs/job-get)
+                                   --wait           Wait for job completion and print output
                                    --workdir=<path> Working directory
-                                   --no-capture     Don't capture stdout/stderr
-
-    exec-b64 <id> [opts] <cmd>   Execute base64-safe command
-                                 opts:
-                                   --timeout=<ms>
 
     logs <id> [limit]            Get container logs (default 100)
     metrics <id>                 Get container metrics
     ready <id>                   Readiness check
 
-    jobs <id>                    List exec jobs (detach mode)
+    jobs <id>                    List exec jobs
     job-get <id> <job_id> [bool] Get exec job details (include_output default true)
     processes <id>               List running processes in container
     process-kill <id> <pid> [signal]
@@ -2130,9 +2156,7 @@ ICC (JETS):
                                    --include-non-running
                                    --limit=<n>
                                    --timeout=<ms>
-                                   --detach
                                    --workdir=<path>
-                                   --no-capture
     icc-messages <container_id> [from_seq] [to_seq] [state] [limit]
                                  Tenant inbox read path
     icc-inbox <container_id> [from_seq] [to_seq] [state] [limit]
@@ -2187,7 +2211,6 @@ main() {
         create-batch)   cmd_create_batch "$@" ;;
         rename)         cmd_rename "$@" ;;
         exec|run)       cmd_exec "$@" ;;
-        exec-b64)       cmd_exec_b64 "$@" ;;
         logs)           cmd_logs "$@" ;;
         start)          cmd_start "$@" ;;
         stop)           cmd_stop "$@" ;;

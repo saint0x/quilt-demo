@@ -96,15 +96,14 @@ POST   /api/containers
 POST   /api/containers/<container_id>/start
 POST   /api/containers/<container_id>/rename
 POST   /api/containers/<container_id>/kill
-POST   /api/containers/<container_id>/stop?execution=async
-POST   /api/containers/<container_id>/resume?execution=async
-DELETE /api/containers/<container_id>?execution=async
+POST   /api/containers/<container_id>/stop
+POST   /api/containers/<container_id>/resume
+DELETE /api/containers/<container_id>
 ```
 
 Important semantics:
 
-- `start` is immediate
-- `stop`, `resume`, and delete are operation-driven and should return `202`
+- `create`, `start`, `stop`, `resume`, and delete are operation-driven and should return `202`
 - readiness should be checked explicitly; do not assume a created or resumed container is ready yet
 - resolving by name is helpful, but IDs are the safer handle once a target is known
 
@@ -177,7 +176,7 @@ Create from pulled image:
 Batch create route:
 
 ```text
-POST /api/containers/batch?execution=async
+POST /api/containers/batch
 ```
 
 Batch payload contract:
@@ -348,6 +347,18 @@ Important semantics:
 - exec is submit-and-track; the route returns a job handle immediately
 - shell behavior is explicit, not implied: if shell parsing is required, invoke `["/bin/sh", "-lc", "..."]` or another interpreter directly
 
+Exec accepted response:
+
+```json
+{
+  "success": true,
+  "container_id": "ctr_123",
+  "job_id": "job_123",
+  "status": "running",
+  "status_url": "/api/containers/ctr_123/jobs/job_123"
+}
+```
+
 Exec job inspection routes:
 
 ```text
@@ -357,7 +368,7 @@ GET /api/containers/<container_id>/processes
 DELETE /api/containers/<container_id>/processes/<pid>?signal=<signal>
 ```
 
-Agent rule: for long-running or detached work, inspect jobs instead of guessing whether the command succeeded.
+Agent rule: exec is always job-driven. Submit the command, then inspect the job record for completion and output.
 
 ## Operations
 
@@ -402,7 +413,7 @@ GET    /api/snapshots
 GET    /api/snapshots?container_id=<container_id>
 GET    /api/snapshots/<snapshot_id>
 GET    /api/snapshots/<snapshot_id>/lineage
-POST   /api/snapshots/<snapshot_id>/clone?execution=async
+POST   /api/snapshots/<snapshot_id>/clone
 POST   /api/snapshots/<snapshot_id>/pin
 POST   /api/snapshots/<snapshot_id>/unpin
 DELETE /api/snapshots/<snapshot_id>
@@ -433,7 +444,7 @@ Agent rule: use snapshots plus clone when reproducibility matters. Use lineage r
 Container fork route:
 
 ```text
-POST /api/containers/<container_id>/fork?execution=async
+POST /api/containers/<container_id>/fork
 ```
 
 Optional payload:
@@ -524,7 +535,7 @@ GET    /api/volumes/<name>/ls?path=<path>
 GET    /api/volumes/<name>/files/<path>
 DELETE /api/volumes/<name>/files/<path>
 POST   /api/volumes/<name>/rename
-DELETE /api/volumes/<name>?execution=async
+DELETE /api/volumes/<name>
 ```
 
 Create payload:
@@ -608,7 +619,7 @@ Primary route:
 GET /api/containers/<container_id>/gui-url
 ```
 
-Use GUI access only for GUI-capable containers. If a workload needs browser-visible desktop behavior, create the container from an image intended for that purpose.
+Use GUI access only for GUI-capable containers. The signed URL route only succeeds when the container is running, network-ready, and serving the GUI backend.
 
 GUI-capable container create shape:
 
