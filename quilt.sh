@@ -64,7 +64,7 @@
 #   Typical flow:
 #     1) Create a prod-gui container.
 #     2) Optionally launch GUI apps on the X display:
-#          ./quilt.sh exec <container_id> "apk add --no-cache xeyes xclock && DISPLAY=:1 xeyes & DISPLAY=:1 xclock &"
+#          ./quilt.sh exec <container_id> "apt-get update && apt-get install -y x11-apps && DISPLAY=:1 xeyes & DISPLAY=:1 xclock &"
 #     3) Get signed GUI URL:
 #          curl -sS -H "X-Api-Key: $QUILT_API_KEY" \
 #            "$QUILT_API_URL/api/containers/<container_id>/gui-url"
@@ -2005,7 +2005,7 @@ GUI WORKLOADS (QGUI):
     Run GUI apps inside a container and access them in browser:
       Use the managed prod-gui image. It starts the GUI stack automatically.
       If your current container is non-GUI, create a new container using image prod-gui first.
-      1) ./quilt.sh exec <id> "apk add --no-cache xeyes xclock && DISPLAY=:1 xeyes & DISPLAY=:1 xclock &"
+      1) ./quilt.sh exec <id> "apt-get update && apt-get install -y x11-apps && DISPLAY=:1 xeyes & DISPLAY=:1 xclock &"
       2) curl -sS -H "X-Api-Key: $QUILT_API_KEY" \
            "$QUILT_API_URL/api/containers/<id>/gui-url"
          Open returned gui_url immediately.

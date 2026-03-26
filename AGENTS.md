@@ -666,6 +666,7 @@ Notes:
 
 - `prod-gui` starts the GUI stack automatically.
 - `prod-gui` does not accept a custom `command`; the GUI supervisor is the canonical container command.
+- `prod-gui` is Ubuntu-based and includes `apt`, XFCE/noVNC, Rust/Cargo/CMake, and native X11/GTK build dependencies.
 
 ## ICC
 
