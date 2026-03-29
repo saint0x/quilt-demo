@@ -105,6 +105,8 @@ Important semantics:
 
 - `create`, `start`, `stop`, `resume`, and delete are operation-driven and should return `202`
 - readiness should be checked explicitly; do not assume a created or resumed container is ready yet
+- `ready` means the container is command-ready for exec, terminal, filesystem, and normal agent operations
+- `checks.workload_ready` is the workload-specific health signal; it may be `false` for valid dev or worker containers such as `sleep infinity`
 - resolving by name is helpful, but IDs are the safer handle once a target is known
 
 Create request shape:
@@ -112,7 +114,7 @@ Create request shape:
 ```json
 {
   "name": "demo",
-  "image": "prod-gui",
+  "image": "prod",
   "oci": false,
   "working_directory": "/app",
   "memory_limit_mb": 1024,
@@ -132,6 +134,7 @@ Notes:
 - `command` is executed as an argv array, not a raw shell blob
 - `strict` is a boolean when supplied
 - create is async-oriented and should be treated as operation-driven
+- `prod-gui` is a special managed image and does not accept a custom `command`
 
 ### Docker Compatibility
 
