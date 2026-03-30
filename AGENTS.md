@@ -68,7 +68,7 @@ Think in terms of stable resources:
 - containers are the primary runtime unit
 - exec jobs are commands launched inside a container
 - operations represent async lifecycle work
-- snapshots capture container state for cloning and lineage
+- snapshots capture container state for cloning, forking, and lineage
 - volumes hold persistent filesystem data
 - network resources expose container addressing and diagnostics
 
@@ -462,10 +462,12 @@ Agent rule: use snapshots plus clone when reproducibility matters. Use lineage r
 
 ## Forking
 
-Container fork route:
+Container-level fork is no longer supported.
+
+Supported fork route:
 
 ```text
-POST /api/containers/<container_id>/fork
+POST /api/snapshots/<snapshot_id>/fork
 ```
 
 Optional payload:
@@ -476,7 +478,10 @@ Optional payload:
 }
 ```
 
-Fork is the right choice for branching directly from current container state. Clone is the right choice when the source of truth is a snapshot.
+Agent rule:
+- create a snapshot first
+- then use snapshot fork when you want a writable branch from that captured state
+- use snapshot clone when you want the same snapshot as the reproducible source of truth
 
 ## Environment Variables
 
