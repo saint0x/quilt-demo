@@ -116,6 +116,7 @@ Create request shape:
   "name": "demo",
   "image": "prod",
   "oci": false,
+  "volumes": ["data-volume:/workspace"],
   "working_directory": "/app",
   "memory_limit_mb": 1024,
   "cpu_limit_percent": 50,
@@ -132,6 +133,8 @@ Notes:
 - `name` is required
 - all other fields are optional
 - `command` is executed as an argv array, not a raw shell blob
+- use `volumes`, not `mounts`, for persistent volume attachment during container create
+- volume attachment strings use `<volume-name>:<target-path>`
 - `strict` is a boolean when supplied
 - create is async-oriented and should be treated as operation-driven
 - `prod-gui` is a special managed image and does not accept a custom `command`
@@ -519,7 +522,7 @@ Volume archive upload route:
 POST /api/volumes/<name>/archive
 ```
 
-Archive payload contract:
+Container archive payload contract:
 
 ```json
 {
@@ -528,6 +531,12 @@ Archive payload contract:
   "path": "/app"
 }
 ```
+
+Volume archive payload contract:
+
+- send the archive body directly
+- use a binary content type such as `application/zip`
+- do not wrap the archive in JSON
 
 Single-file volume write:
 
