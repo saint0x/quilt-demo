@@ -146,6 +146,8 @@ Quilt supports Docker-compatible image ingress through OCI registry pulls and OC
 Primary image routes:
 
 ```text
+POST   /api/build-contexts
+POST   /api/oci/images/build
 POST   /api/oci/images/pull
 GET    /api/oci/images
 GET    /api/oci/images/inspect?reference=<ref>
@@ -155,10 +157,30 @@ DELETE /api/oci/images?reference=<ref>
 
 Important semantics:
 
+- caller-local build contexts are uploaded to `POST /api/build-contexts` as JSON, not raw archive bytes
+- the request field is `content`, containing base64-encoded `tar` or `tar.gz` build context data
+- OCI image builds then reference that `context_id` through `POST /api/oci/images/build`
 - Quilt accepts Docker/OCI registry references such as `nginx`, `docker.io/library/alpine:3.20`, or `ghcr.io/owner/image:tag`
 - this is image compatibility, not Docker Engine API compatibility
 - after pulling an OCI image, create the container through normal container create with `oci: true`
 - image metadata such as env, entrypoint/cmd, and working directory come from the pulled image config unless explicitly overridden
+
+Build-context upload request:
+
+```json
+{
+  "content": "<base64 tar.gz build context>"
+}
+```
+
+Build OCI image from uploaded context:
+
+```json
+{
+  "context_id": "uuid",
+  "image_reference": "quilt.local/demo/app:latest"
+}
+```
 
 Image pull request:
 
