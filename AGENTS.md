@@ -673,10 +673,10 @@ Agent rule: inspect network diagnostics before assuming a connectivity issue is 
 Primary route:
 
 ```text
-GET /api/containers/<container_id>/gui-url
+GET /api/containers/<container_id>/gui
 ```
 
-Use GUI access only for `prod-gui` containers. The signed URL route only succeeds when the container is running, network-ready, and serving the GUI backend.
+Use GUI access only for `prod-gui` containers. The signed GUI route returns `302 Found` with a `Location` header pointing at `/gui/<container_id>/?gui_token=...`. It only succeeds when the container is running, network-ready, and serving the GUI backend.
 
 GUI-capable container create shape:
 
@@ -699,7 +699,7 @@ Typical GUI flow:
 
 1. Create a container from a GUI-capable image such as `prod-gui`.
 2. Wait for the container to become ready.
-3. Request the signed GUI URL for that container.
+3. Request `GET /api/containers/<container_id>/gui` and follow the returned `Location` header.
 
 Notes:
 
@@ -707,9 +707,10 @@ Notes:
 - `prod-gui` does not accept a custom `command`; the GUI supervisor is the canonical container command.
 - `prod-gui` is Ubuntu-based and includes `apt`, XFCE/noVNC, Rust/Cargo/CMake, and native X11/GTK build dependencies.
 - Inside a running GUI container, `qgui env` prints the managed session variables and `qgui run -- <command...>` launches desktop apps without manual `DISPLAY` or DBus wiring.
-- The signed `gui_url` lands on Quilt's container-scoped noVNC proxy under `/gui/<container_id>/...`.
+- The signed redirect target lands on Quilt's container-scoped noVNC proxy under `/gui/<container_id>/...`.
 - Quilt rewrites the served noVNC entrypoint so browser assets and the VNC websocket stay container-scoped at `gui/<container_id>/websockify`.
-- Use the signed `gui_url` as returned; do not rewrite the path or point the browser at `/websockify` directly.
+- `GET /api/containers/<container_id>/gui-url` is intentionally absent and should return `404`.
+- Use the signed `Location` value as returned; do not rewrite the path or point the browser at `/websockify` directly.
 
 ## ICC
 
@@ -818,6 +819,12 @@ quiltc k8s apply -f ./manifests --cluster-id <cluster_id> --application default 
 quiltc k8s diff -f ./manifests --cluster-id <cluster_id>
 quiltc k8s status --operation <operation_id> --cluster-id <cluster_id> --follow
 ```
+
+Node registration contract note:
+
+- the live HTTP route is `POST /api/clusters/<cluster_id>/nodes/register`
+- the request body must include `name` and `bridge_name`
+- if you hand-roll HTTP instead of using `quiltc`, omitting `bridge_name` now returns `422 UNPROCESSABLE_ENTITY`
 
 Behavior notes:
 
