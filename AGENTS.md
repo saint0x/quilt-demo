@@ -630,7 +630,10 @@ GET  /api/containers/<container_id>/network/diagnostics
 GET  /api/containers/<container_id>/egress
 POST /api/containers/<container_id>/routes
 DELETE /api/containers/<container_id>/routes
-GET  /api/activity?limit=<n>
+GET  /api/activity?limit=<n>&container_id=<id>
+GET  /api/activity?limit=<n>&project_id=<id>
+GET  /api/activity?limit=<n>&workflow_id=<id>
+GET  /api/notifications?limit=<n>
 GET  /api/monitors/processes
 GET  /api/monitors/profile
 GET  /api/dns/entries
@@ -665,6 +668,13 @@ Forced cleanup payload:
   "remove_volumes": false
 }
 ```
+
+Operator-surface semantics:
+
+- `GET /api/activity` now requires an explicit workflow or resource scope filter; a plain `since` time window is rejected
+- valid activity scoping should use a concrete resource or workflow query param such as `container_id`, `project_id`, or `workflow_id`
+- `GET /api/notifications?limit=<n>` works without extra scope params on the default path
+- notifications now surface mixed workflow events, not just function events; recent live scopes included `volume`, `image`, `container`, and `snapshot`
 
 Agent rule: inspect network diagnostics before assuming a connectivity issue is application-level.
 
