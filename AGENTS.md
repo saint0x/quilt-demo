@@ -948,6 +948,23 @@ Important semantics:
 
 GitHub: [ariacomputecompany/quiltc](https://github.com/ariacomputecompany/quiltc)
 
+Use `quiltc` for:
+
+- create or inspect clusters
+- mint join tokens
+- register, heartbeat, drain, or delete nodes
+- create, update, or delete workloads
+- reconcile placements across nodes
+- follow long-running control-plane operations
+- apply or diff Kubernetes manifests against Quilt backend `k8s` endpoints
+
+Core mental model:
+
+- cluster = desired-state control plane
+- node = agent-managed host participating in a cluster
+- workload = desired replicated application spec
+- placement = scheduler assignment of a workload replica onto a node
+
 Important `quiltc` auth inputs:
 
 - `QUILT_BASE_URL`
@@ -987,10 +1004,16 @@ quiltc k8s status --operation <operation_id> --cluster-id <cluster_id> --follow
 
 Behavior notes:
 
-- `quiltc` wraps the platform over HTTP
+- `quiltc` wraps the platform over HTTP; do not rely on local runtime CLIs in this guide
 - `apply` and `diff` require `--cluster-id`
-- `apply` validates first by default
+- `apply` validates first by default; use `--no-validate` only when intentionally skipping backend validation
 - `--dry-run` on `k8s apply` uses validate-plus-diff behavior without mutating backend state
+
+Node registration contract note:
+
+- the live HTTP route is `POST /api/agent/clusters/<cluster_id>/nodes/register`
+- the request body must include `name`, `bridge_name`, `dns_port`, and `egress_limit_mbit`
+- if you hand-roll HTTP instead of using `quiltc`, omitting required registration fields returns `422 UNPROCESSABLE_ENTITY`
 
 ## Serverless Functions
 
@@ -1110,3 +1133,4 @@ Agent rule: when diagnosing serverless behavior, inspect function state, recent 
 - If diagnosing connectivity, inspect container network diagnostics before changing routes or IP assignments.
 - If the task is interactive, prefer terminal sessions over ad hoc exec polling.
 - If the task is about clusters, nodes, workloads, placements, join tokens, or Kubernetes manifests, use the cluster and agent patterns in this guide.
+- If the task is about clusters, nodes, workloads, placements, join tokens, or Kubernetes manifests, prefer the `quiltc` patterns in this guide.
