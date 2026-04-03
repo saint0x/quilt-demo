@@ -1,18 +1,20 @@
 # Quilt Platform Agent Guide
 
-This file is the standalone agent guide for the Quilt platform. Treat it as the operational reference for the platform resources, API contracts, orchestration flows, and the agent-facing operating model.
+This file is the standalone agent guide for the Quilt platform. Treat it as the operational reference for the backend behavior implemented in `quilt-prod`, with examples and route names aligned to the live HTTP surface.
 
 ## Scope
 
 Use this guide when working with:
 
 - containers
+- OCI image pulls and builds
 - elasticity
 - exec jobs
-- snapshots
-- volumes
-- network state
-- operations
+- snapshots and forks
+- volumes and file transfer
+- network state and diagnostics
+- operations and events
+- terminal sessions and WebSocket attach
 - GUI access
 - ICC messaging
 - clusters
@@ -26,7 +28,7 @@ Use this guide when working with:
 
 ## Authentication
 
-Most API routes require one of these headers:
+Most protected API routes require one of these headers:
 
 - `X-Api-Key: <key>`
 - `Authorization: Bearer <token>`
@@ -68,17 +70,19 @@ Think in terms of stable resources:
 - containers are the primary runtime unit
 - exec jobs are commands launched inside a container
 - operations represent async lifecycle work
-- snapshots capture container state for cloning, forking, and lineage
+- snapshots capture container state for cloning and lineage
+- container fork creates a writable branch from a live container
 - volumes hold persistent filesystem data
 - network resources expose container addressing and diagnostics
+- terminal sessions are managed interactive PTY sessions
 
 A typical troubleshooting flow is:
 
 1. confirm API health
-2. resolve the target container
+2. resolve the target container or function
 3. inspect readiness and current state
 4. act
-5. inspect the resulting operation or exec job
+5. inspect the resulting operation, exec job, or invocation record
 
 ## Containers
 
@@ -93,23 +97,27 @@ GET    /api/containers/<container_id>/ready
 GET    /api/containers/<container_id>/metrics
 GET    /api/containers/<container_id>/logs?limit=<n>
 POST   /api/containers
+POST   /api/containers/batch
 POST   /api/containers/<container_id>/start
 POST   /api/containers/<container_id>/rename
 POST   /api/containers/<container_id>/kill
 POST   /api/containers/<container_id>/stop
 POST   /api/containers/<container_id>/resume
+POST   /api/containers/<container_id>/snapshot
+POST   /api/containers/<container_id>/fork
 DELETE /api/containers/<container_id>
 ```
 
 Important semantics:
 
-- `create`, `start`, `stop`, `resume`, and delete are operation-driven and should return `202`
-- readiness should be checked explicitly; do not assume a created or resumed container is ready yet
-- `ready` currently means the container is running and its `minit` control socket is responsive
+- `create`, `batch create`, `start`, `stop`, `resume`, `fork`, and delete are operation-driven and return `202`
+- `kill` and `rename` are direct mutations, not operation handles
+- readiness should be checked explicitly; do not assume a created, started, resumed, or forked container is ready yet
+- `ready` means the container is running and its `minit` control socket is responsive
 - `init_ready` mirrors `minit` socket responsiveness
-- `checks` currently reports `state_running`, `minit_responsive`, and `network_configured`
-- `ready` is the exec gate for the HTTP exec API; it is not a workload-specific application health signal and it does not imply GUI backend readiness
-- resolving by name is helpful, but IDs are the safer handle once a target is known
+- `checks` reports `state_running`, `minit_responsive`, and `network_configured`
+- `ready` is the exec gate for the HTTP exec API; it is not an application health signal and it does not imply GUI backend readiness
+- resolving by name is convenient, but IDs are the safer handle once a target is known
 
 Create request shape:
 
@@ -122,11 +130,16 @@ Create request shape:
   "working_directory": "/app",
   "memory_limit_mb": 1024,
   "cpu_limit_percent": 50,
+  "gpu_count": 1,
+  "gpu_ids": ["nvidia0"],
   "strict": true,
+  "labels": {
+    "team": "qa"
+  },
   "environment": {
     "FOO": "bar"
   },
-  "command": ["/bin/sh", "-c", "echo hello"]
+  "command": ["/bin/sh", "-lc", "echo hello"]
 }
 ```
 
@@ -134,14 +147,24 @@ Notes:
 
 - `name` is required
 - all other fields are optional
-- `command` is executed as an argv array, not a raw shell blob
+- `command` is argv-only, not a raw shell blob
 - use `volumes`, not `mounts`, for persistent volume attachment during container create
 - volume attachment strings use `<volume-name>:<target-path>`
 - `strict` is a boolean when supplied
-- create is async-oriented and should be treated as operation-driven
 - `prod-gui` is a special managed image and does not accept a custom `command`
 
-### Docker Compatibility
+Batch payload contract:
+
+```json
+{
+  "items": [
+    { "name": "web-1" },
+    { "name": "web-2", "command": ["/bin/sh", "-lc", "echo ready"] }
+  ]
+}
+```
+
+## OCI Images
 
 Quilt supports Docker-compatible image ingress through OCI registry pulls and OCI-backed container create.
 
@@ -161,7 +184,7 @@ Important semantics:
 
 - caller-local build contexts are uploaded to `POST /api/build-contexts` as JSON, not raw archive bytes
 - the request field is `content`, containing base64-encoded `tar` or `tar.gz` build context data
-- OCI image builds then reference that `context_id` through `POST /api/oci/images/build`
+- OCI image builds reference that `context_id` through `POST /api/oci/images/build`
 - Quilt accepts Docker/OCI registry references such as `nginx`, `docker.io/library/alpine:3.20`, or `ghcr.io/owner/image:tag`
 - this is image compatibility, not Docker Engine API compatibility
 - after pulling an OCI image, create the container through normal container create with `oci: true`
@@ -180,7 +203,12 @@ Build OCI image from uploaded context:
 ```json
 {
   "context_id": "uuid",
-  "image_reference": "quilt.local/demo/app:latest"
+  "image_reference": "quilt.local/demo/app:latest",
+  "dockerfile_path": "Dockerfile",
+  "build_args": {
+    "APP_ENV": "prod"
+  },
+  "target_stage": "runtime"
 }
 ```
 
@@ -203,23 +231,6 @@ Create from pulled image:
 }
 ```
 
-Batch create route:
-
-```text
-POST /api/containers/batch
-```
-
-Batch payload contract:
-
-```json
-{
-  "items": [
-    { "name": "web-1" },
-    { "name": "web-2", "command": ["/bin/sh", "-c", "echo ready"] }
-  ]
-}
-```
-
 ## GPU Passthrough
 
 GPU support is an explicit platform contract, not a raw mount workaround.
@@ -228,7 +239,7 @@ Use GPU passthrough when:
 
 - creating containers that need NVIDIA device access
 - creating workloads that must land on GPU-capable nodes
-- reporting node GPU inventory during agent register/heartbeat
+- reporting node GPU inventory during agent register or heartbeat
 - debugging why a workload did or did not receive a GPU assignment
 
 Container create shape:
@@ -247,7 +258,7 @@ Important semantics:
 
 - raw `/dev/nvidia*` bind mounts remain blocked
 - `gpu_count` is the primary request field
-- `gpu_ids` is optional explicit pinning and must match `gpu_count` when used
+- `gpu_ids` is optional explicit pinning and must exactly match `gpu_count` when used
 - node GPU inventory is agent-reported control-plane state
 - scheduler placement must satisfy GPU inventory before assigning a workload
 
@@ -278,11 +289,10 @@ POST /api/elasticity/control/actions/<action_id>/rollback
 Important semantics:
 
 - resize is part of elasticity; there is no separate resize model outside this section
-- tenant-facing elasticity routes mutate the target directly and return the updated resource state
+- tenant-facing elasticity routes mutate the target directly and return updated state synchronously
 - control routes are orchestrator-facing and are operation-driven
-- control writes should be treated as idempotent actions keyed by `Idempotency-Key`
-- control writes must carry tenant scope explicitly via `X-Tenant-Id`
-- `X-Orch-Action-Id` is the stable correlation key for operation lookup and rollback
+- all elasticity routes require `X-Tenant-Id`, and the header must match the authenticated tenant
+- control writes also require `Idempotency-Key` and `X-Orch-Action-Id`
 - the control contract route is the source of truth for backend-owned elasticity endpoints
 
 Resize payload:
@@ -349,7 +359,9 @@ Rollback payload:
 
 ```json
 {
-  "reason": "rollback requested by orchestrator"
+  "target_action_id": "elastic-action-123",
+  "reason_code": "manual_rollback",
+  "reason_message": "rollback requested by orchestrator"
 }
 ```
 
@@ -376,6 +388,7 @@ Important semantics:
 - `command` is argv-only and must be a JSON array of strings
 - exec is submit-and-track; the route returns a job handle immediately
 - shell behavior is explicit, not implied: if shell parsing is required, invoke `["/bin/sh", "-lc", "..."]` or another interpreter directly
+- the container must be running and `minit` must be healthy, or exec is rejected
 
 Exec accepted response:
 
@@ -392,31 +405,20 @@ Exec accepted response:
 Exec job inspection routes:
 
 ```text
-GET /api/containers/<container_id>/jobs
-GET /api/containers/<container_id>/jobs/<job_id>?include_output=true
-GET /api/containers/<container_id>/processes
+GET    /api/containers/<container_id>/jobs
+GET    /api/containers/<container_id>/jobs/<job_id>?include_output=true
+GET    /api/containers/<container_id>/processes
 DELETE /api/containers/<container_id>/processes/<pid>?signal=<signal>
 ```
 
+Observed job statuses:
+
+- `running`
+- `completed`
+- `failed`
+- `timeout`
+
 Agent rule: exec is always job-driven. Submit the command, then inspect the job record for completion and output.
-Exec submission requires an exec-ready container with a protocol-compatible `minit` control socket.
-
-Exec job poll response:
-
-```json
-{
-  "job_id": "job_123",
-  "container_id": "ctr_123",
-  "command": "/bin/sh -lc npm test",
-  "status": "failed",
-  "exit_code": null,
-  "started_at": 1760000000,
-  "completed_at": 1760000001,
-  "error_message": "Failed to connect to minit socket /var/lib/quilt/containers/ctr_123/run/minit.sock: No such file or directory",
-  "stdout": "",
-  "stderr": "Failed to connect to minit socket /var/lib/quilt/containers/ctr_123/run/minit.sock: No such file or directory"
-}
-```
 
 ## Operations
 
@@ -451,20 +453,26 @@ Observed operation statuses:
 
 The event stream emits operation updates. Agents should prefer waiting on the operation status rather than retrying mutating requests blindly.
 
-## Snapshots
+## Snapshots And Forking
 
-Primary routes:
+Snapshot routes:
 
 ```text
-POST   /api/containers/<container_id>/snapshot
 GET    /api/snapshots
 GET    /api/snapshots?container_id=<container_id>
 GET    /api/snapshots/<snapshot_id>
 GET    /api/snapshots/<snapshot_id>/lineage
+POST   /api/containers/<container_id>/snapshot
 POST   /api/snapshots/<snapshot_id>/clone
 POST   /api/snapshots/<snapshot_id>/pin
 POST   /api/snapshots/<snapshot_id>/unpin
 DELETE /api/snapshots/<snapshot_id>
+```
+
+Container fork route:
+
+```text
+POST /api/containers/<container_id>/fork
 ```
 
 Snapshot creation payload:
@@ -473,7 +481,11 @@ Snapshot creation payload:
 {
   "consistency_mode": "crash-consistent",
   "network_mode": "reset",
-  "volume_mode": "exclude"
+  "volume_mode": "exclude",
+  "ttl_seconds": 3600,
+  "labels": {
+    "suite": "demo"
+  }
 }
 ```
 
@@ -481,34 +493,34 @@ Clone payload:
 
 ```json
 {
-  "name": "clone-name"
+  "resume_policy": "immediate",
+  "name": "clone-name",
+  "labels": {
+    "suite": "demo"
+  }
 }
 ```
 
-Agent rule: use snapshots plus clone when reproducibility matters. Use lineage routes before making assumptions about ancestry.
-
-## Forking
-
-Container-level fork is no longer supported.
-
-Supported fork route:
-
-```text
-POST /api/snapshots/<snapshot_id>/fork
-```
-
-Optional payload:
+Fork payload:
 
 ```json
 {
-  "name": "fork-name"
+  "consistency_mode": "crash-consistent",
+  "network_mode": "reset",
+  "volume_mode": "exclude",
+  "resume_policy": "immediate",
+  "name": "fork-name",
+  "labels": {
+    "suite": "demo"
+  }
 }
 ```
 
 Agent rule:
-- create a snapshot first
-- then use snapshot fork when you want a writable branch from that captured state
-- use snapshot clone when you want the same snapshot as the reproducible source of truth
+
+- use snapshots plus clone when reproducibility matters
+- use container fork when you want a writable branch from a live container
+- use lineage routes before making assumptions about ancestry
 
 ## Environment Variables
 
@@ -546,7 +558,7 @@ Volume archive upload route:
 POST /api/volumes/<name>/archive
 ```
 
-Container archive payload contract:
+Archive payload contract for both routes:
 
 ```json
 {
@@ -555,12 +567,6 @@ Container archive payload contract:
   "path": "/app"
 }
 ```
-
-Volume archive payload contract:
-
-- send the archive body directly
-- use a binary content type such as `application/zip`
-- do not wrap the archive in JSON
 
 Single-file volume write:
 
@@ -577,6 +583,12 @@ Payload:
   "mode": 644
 }
 ```
+
+Notes:
+
+- archive uploads are operation-driven
+- single-file volume reads and writes are synchronous
+- `mode` is an octal permission value encoded as an integer such as `644` or `755`
 
 Agent rule: archive upload is the normal shape for syncing a codebase or bundle into a target filesystem.
 
@@ -617,9 +629,15 @@ Rename payload:
 }
 ```
 
+Important semantics:
+
+- volume delete is operation-driven
+- file download and delete paths use the wildcard path segment after `/files/`
+- volume list, inspect, ls, rename, and single-file operations are direct request-response routes
+
 Agent rule: choose volumes for persistent state that should survive container replacement.
 
-## Network And Diagnostics
+## Network, Activity, Notifications, And Cleanup
 
 Primary routes:
 
@@ -632,12 +650,14 @@ GET  /api/containers/<container_id>/network/diagnostics
 GET  /api/containers/<container_id>/egress
 POST /api/containers/<container_id>/routes
 DELETE /api/containers/<container_id>/routes
-GET  /api/activity?limit=<n>&container_id=<id>
-GET  /api/activity?limit=<n>&project_id=<id>
-GET  /api/activity?limit=<n>&workflow_id=<id>
-GET  /api/notifications?limit=<n>
+GET  /api/activity?limit=<n>
+GET  /api/notifications
+PUT  /api/notifications/<notification_id>/read
+POST /api/notifications/mark-all-read
+GET  /api/monitors
 GET  /api/monitors/processes
 GET  /api/monitors/profile
+GET  /api/monitors/<container_id>
 GET  /api/dns/entries
 POST /api/dns/entries/<current_name>/rename
 GET  /api/cleanup/status
@@ -666,19 +686,52 @@ Forced cleanup payload:
 
 ```json
 {
-  "confirm": true,
-  "remove_volumes": false
+  "confirm": true
 }
 ```
 
 Operator-surface semantics:
 
-- `GET /api/activity` now requires an explicit workflow or resource scope filter; a plain `since` time window is rejected
-- valid activity scoping should use a concrete resource or workflow query param such as `container_id`, `project_id`, or `workflow_id`
-- `GET /api/notifications?limit=<n>` works without extra scope params on the default path
-- notifications now surface mixed workflow events, not just function events; recent live scopes included `volume`, `image`, `container`, and `snapshot`
+- `GET /api/activity` is tenant-scoped and only accepts `limit`
+- notifications are tenant-scoped and the current list route does not take a `limit` query param
+- `POST /api/containers/<id>/cleanup/force` requires `confirm=true`
+- monitor routes distinguish monitor records, monitoring processes, and per-container monitor status
 
 Agent rule: inspect network diagnostics before assuming a connectivity issue is application-level.
+
+## Terminal Sessions
+
+Managed terminal session routes:
+
+```text
+GET    /api/terminal/sessions
+POST   /api/terminal/sessions
+GET    /api/terminal/sessions/<session_id>
+DELETE /api/terminal/sessions/<session_id>
+POST   /api/terminal/sessions/<session_id>/resize
+GET    /ws/terminal/attach
+```
+
+Create session payload:
+
+```json
+{
+  "container_id": "ctr_123",
+  "cols": 120,
+  "rows": 40,
+  "shell": "/bin/bash"
+}
+```
+
+Important semantics:
+
+- `POST /api/terminal/sessions` creates a managed session and returns `201`
+- the response includes `attach_url`, which points at `wss://backend.quilt.sh/ws/terminal/attach?session_id=...`
+- the WebSocket attach route requires the `terminal` subprotocol
+- the WebSocket path can attach an existing session or create a fresh one when `session_id` is omitted and `container_id` is provided
+- terminal sessions are tenant-scoped and capped per tenant
+
+Agent rule: use terminal sessions for interactive shell behavior; use exec jobs for non-interactive command execution.
 
 ## GUI Access
 
@@ -688,7 +741,7 @@ Primary route:
 GET /api/containers/<container_id>/gui-url
 ```
 
-Use GUI access only for `prod-gui` containers. This route returns JSON containing a signed `gui_url` under `/gui/<container_id>/?gui_token=...`. It only succeeds when the container is running, has an IP address, and the GUI backend is reachable.
+Use GUI access only for `prod-gui` containers. This route returns JSON containing a signed `gui_url` under `/gui/<container_id>/?gui_token=...`.
 
 GUI-capable container create shape:
 
@@ -696,7 +749,6 @@ GUI-capable container create shape:
 {
   "name": "demo-gui",
   "image": "prod-gui",
-  "oci": false,
   "working_directory": "/app",
   "memory_limit_mb": 1024,
   "cpu_limit_percent": 50,
@@ -709,25 +761,22 @@ GUI-capable container create shape:
 
 Typical GUI flow:
 
-1. Create a container from a GUI-capable image such as `prod-gui`.
-2. Wait for the container to become exec-ready via `GET /api/containers/<container_id>/ready`.
+1. Create a container from `prod-gui`.
+2. Wait for `GET /api/containers/<container_id>/ready`.
 3. Request `GET /api/containers/<container_id>/gui-url`.
 4. Open the returned `gui_url` value as-is.
 
 Notes:
 
-- `prod-gui` starts the GUI stack automatically.
-- `prod-gui` does not accept a custom `command`; the GUI supervisor is the canonical container command.
-- `prod-gui` is Ubuntu-based and includes `apt`, XFCE/noVNC, Rust/Cargo/CMake, and native X11/GTK build dependencies.
-- Inside a running GUI container, `qgui env` prints the managed session variables and `qgui run -- <command...>` launches desktop apps without manual `DISPLAY` or DBus wiring.
-- The returned `gui_url` lands on Quilt's container-scoped noVNC proxy under `/gui/<container_id>/...`.
-- Quilt rewrites the served noVNC entrypoint so browser assets and the VNC websocket stay container-scoped at `gui/<container_id>/websockify`.
-- `GET /api/containers/<container_id>/gui` is not part of the current HTTP API contract.
-- Use the returned `gui_url` value as-is; do not rewrite the path or point the browser at `/websockify` directly.
+- `prod-gui` starts the GUI stack automatically
+- `prod-gui` does not accept a custom `command`
+- the returned `gui_url` lands on Quilt's container-scoped noVNC proxy under `/gui/<container_id>/...`
+- Quilt rewrites the served noVNC entrypoint so browser assets and the VNC websocket stay container-scoped at `/gui/<container_id>/websockify`
+- `GET /api/containers/<container_id>/gui` is not part of the current HTTP API contract
 
 ## ICC
 
-ICC is the platform surface for local communication between multiple containers that need a protocol channel between them without going through HTTP and a reverse proxy. Use it when containers need structured inter-container messaging on the local platform network.
+ICC is the platform surface for structured container messaging without going through the normal app HTTP path.
 
 Common routes:
 
@@ -737,13 +786,27 @@ GET  /api/icc/health
 GET  /api/icc/streams
 GET  /api/icc/schema
 GET  /api/icc/types
-GET  /api/containers/<container_id>/icc
-GET  /api/icc/containers/<container_id>/state-version
 GET  /api/icc/proto
 GET  /api/icc/descriptor
+GET  /api/icc/messages?container_identifier=<id>&limit=<n>
+GET  /api/icc/inbox/<container_id>
+GET  /api/icc/containers/<container_id>/state-version
+GET  /api/icc/dlq
+GET  /api/containers/<container_id>/icc
+GET  /api/containers/<container_id>/inbox
+GET  /api/containers/<container_id>/messages
 POST /api/icc/messages
 POST /api/icc/messages/broadcast
+POST /api/icc/exec/broadcast
+POST /api/icc/publish
+POST /api/icc/ack
+POST /api/icc/replay
+POST /api/icc/dlq/<stream_seq>/replay
 POST /api/containers/<container_id>/icc/publish
+POST /api/containers/<container_id>/inbox/ack
+POST /api/icc/inbox/<container_id>/ack
+POST /api/icc/messages/<msg_id>/ack
+POST /api/icc/inbox/<container_id>/replay
 ```
 
 Publish payload:
@@ -767,34 +830,123 @@ Broadcast payload shape:
 }
 ```
 
-Agent rule: use ICC when multiple containers need direct local comms with a real messaging protocol. Do not reach for it when plain HTTP through the normal reverse-proxy path is the actual requirement.
+Exec broadcast payload shape:
 
-## CLI Surfaces
+```json
+{
+  "command": ["echo", "icc-broadcast-ok"],
+  "timeout_ms": 10000,
+  "targets": {
+    "container_ids": ["ctr_123"]
+  }
+}
+```
 
-The Quilt platform uses `quiltc` as the verified HTTP control-plane CLI.
+Ack payload:
 
-### `quiltc` Control Plane CLI
+```json
+{
+  "msg_id": "msg_123",
+  "action": "ack",
+  "reason": "handled"
+}
+```
 
-`quiltc` is Quilt's Kubernetes-like CLI. It drives a desired-state control plane (clusters, nodes, workloads, placements) and a runtime surface (containers, volumes, events) via HTTP.
+Replay payload:
+
+```json
+{
+  "container_identifier": "ctr_123",
+  "state": "acked",
+  "limit": 10
+}
+```
+
+Agent rule: use ICC when containers need direct local messaging with a real protocol. Do not reach for it when normal HTTP is the actual requirement.
+
+## Clusters, Agents, And Kubernetes Compatibility
+
+Tenant-authenticated cluster routes:
+
+```text
+POST   /api/clusters
+GET    /api/clusters
+GET    /api/clusters/<cluster_id>
+DELETE /api/clusters/<cluster_id>
+POST   /api/clusters/<cluster_id>/reconcile
+GET    /api/clusters/<cluster_id>/nodes
+GET    /api/clusters/<cluster_id>/nodes/<node_id>
+DELETE /api/clusters/<cluster_id>/nodes/<node_id>
+POST   /api/clusters/<cluster_id>/nodes/<node_id>/drain
+POST   /api/clusters/<cluster_id>/workloads
+GET    /api/clusters/<cluster_id>/workloads
+GET    /api/clusters/<cluster_id>/workloads/<workload_id>
+PUT    /api/clusters/<cluster_id>/workloads/<workload_id>
+DELETE /api/clusters/<cluster_id>/workloads/<workload_id>
+GET    /api/clusters/<cluster_id>/placements
+GET    /api/clusters/<cluster_id>/capabilities
+POST   /api/clusters/<cluster_id>/join-tokens
+```
+
+Agent-authenticated routes:
+
+```text
+POST /api/agent/clusters/<cluster_id>/nodes/register
+POST /api/agent/clusters/<cluster_id>/nodes/<node_id>/heartbeat
+GET  /api/agent/clusters/<cluster_id>/nodes/<node_id>/allocation
+GET  /api/agent/clusters/<cluster_id>/nodes/<node_id>/placements
+POST /api/agent/clusters/<cluster_id>/nodes/<node_id>/placements/<placement_id>/report
+POST /api/agent/clusters/<cluster_id>/nodes/<node_id>/deregister
+```
+
+Kubernetes compatibility routes:
+
+```text
+GET  /api/k8s/schema
+POST /api/k8s/validate
+POST /api/k8s/diff
+POST /api/k8s/apply
+GET  /api/k8s/applies/<operation_id>
+GET  /api/k8s/resources
+POST /api/k8s/export
+GET  /api/k8s/resources/<resource_id>
+DELETE /api/k8s/resources/<resource_id>
+```
+
+Important auth headers:
+
+- join token registration uses `X-Quilt-Join-Token`
+- node-authenticated follow-up calls use `X-Quilt-Node-Token`
+
+Node registration request shape:
+
+```json
+{
+  "name": "node-a",
+  "public_ip": "203.0.113.10",
+  "private_ip": "10.0.0.10",
+  "agent_version": "agent-build",
+  "labels": {
+    "suite": "control-plane"
+  },
+  "bridge_name": "quilt0",
+  "dns_port": 1053,
+  "egress_limit_mbit": 1000,
+  "gpu_devices": []
+}
+```
+
+Important semantics:
+
+- the live node registration HTTP route is `POST /api/agent/clusters/<cluster_id>/nodes/register`
+- the request body must include `name`, `bridge_name`, `dns_port`, and `egress_limit_mbit`
+- join tokens are minted through the tenant route and then presented to the agent route
+
+## `quiltc` Control Plane CLI
+
+`quiltc` is Quilt's Kubernetes-like CLI. It drives a desired-state control plane and runtime surface via HTTP.
 
 GitHub: [ariacomputecompany/quiltc](https://github.com/ariacomputecompany/quiltc)
-
-Use `quiltc` for:
-
-- create or inspect clusters
-- mint join tokens
-- register, heartbeat, drain, or delete nodes
-- create, update, or delete workloads
-- reconcile placements across nodes
-- follow long-running control-plane operations
-- apply or diff Kubernetes manifests against Quilt backend `k8s` endpoints
-
-Core mental model:
-
-- cluster = desired-state control plane
-- node = agent-managed host participating in a cluster
-- workload = desired replicated application spec
-- placement = scheduler assignment of a workload replica onto a node
 
 Important `quiltc` auth inputs:
 
@@ -813,7 +965,7 @@ quiltc clusters get <cluster_id>
 
 # Node enrollment
 quiltc clusters join-token-create <cluster_id> --ttl-secs 600 --max-uses 1
-quiltc agent register <cluster_id> --join-token <join_token> --name node-a --public-ip 203.0.113.10 --private-ip 10.0.0.10 --agent-version quiltc-test --labels-json '{}' --taints-json '{}' --bridge-name quilt0 --dns-port 53 --egress-limit-mbit 0
+quiltc agent register <cluster_id> --join-token <join_token> --name node-a --public-ip 203.0.113.10 --private-ip 10.0.0.10 --agent-version quiltc-test --labels-json '{}' --bridge-name quilt0 --dns-port 53 --egress-limit-mbit 0
 quiltc agent heartbeat <cluster_id> <node_id> --state ready
 
 # Desired-state scheduling
@@ -833,52 +985,35 @@ quiltc k8s diff -f ./manifests --cluster-id <cluster_id>
 quiltc k8s status --operation <operation_id> --cluster-id <cluster_id> --follow
 ```
 
-Node registration contract note:
-
-- the live HTTP route is `POST /api/clusters/<cluster_id>/nodes/register`
-- the request body must include `name` and `bridge_name`
-- if you hand-roll HTTP instead of using `quiltc`, omitting `bridge_name` now returns `422 UNPROCESSABLE_ENTITY`
-
 Behavior notes:
 
-- `quiltc` wraps the platform over HTTP; do not rely on local runtime CLIs in this guide
+- `quiltc` wraps the platform over HTTP
 - `apply` and `diff` require `--cluster-id`
-- `apply` validates first by default; use `--no-validate` only when intentionally skipping backend validation
+- `apply` validates first by default
 - `--dry-run` on `k8s apply` uses validate-plus-diff behavior without mutating backend state
-
-## Practical Decision Rules
-
-- If the platform may be down, check `GET /health` first.
-- If the task is about a specific runtime, resolve the container and check readiness before mutating it.
-- If a mutation is async, track the operation instead of issuing duplicate requests.
-- If shell parsing is required, invoke the shell explicitly in argv form.
-- If state must persist across container replacement, use volumes.
-- If state must be reproducible, snapshot first and clone from that snapshot.
-- If diagnosing connectivity, inspect container network diagnostics before changing routes or IP assignments.
-- If the task is about clusters, nodes, workloads, placements, join tokens, or Kubernetes manifests, use the `quiltc` patterns in this guide.
 
 ## Serverless Functions
 
 Primary routes:
 
 ```text
-POST /api/functions
-GET  /api/functions
-GET  /api/functions/<function_id>
-GET  /api/functions/by-name/<name>
-PUT  /api/functions/<function_id>
+POST   /api/functions
+GET    /api/functions
+GET    /api/functions/<function_id>
+GET    /api/functions/by-name/<name>
+PUT    /api/functions/<function_id>
 DELETE /api/functions/<function_id>
-POST /api/functions/<function_id>/deploy
-POST /api/functions/<function_id>/pause
-POST /api/functions/<function_id>/resume
-POST /api/functions/<function_id>/invoke
-POST /api/functions/invoke/<name>
-GET  /api/functions/<function_id>/invocations?limit=<n>
-GET  /api/functions/<function_id>/invocations/<invocation_id>
-GET  /api/functions/<function_id>/versions
-POST /api/functions/<function_id>/rollback
-GET  /api/functions/<function_id>/pool
-GET  /api/functions/pool/stats
+POST   /api/functions/<function_id>/deploy
+POST   /api/functions/<function_id>/pause
+POST   /api/functions/<function_id>/resume
+POST   /api/functions/<function_id>/invoke
+POST   /api/functions/invoke/<name>
+GET    /api/functions/<function_id>/invocations?limit=<n>
+GET    /api/functions/<function_id>/versions
+GET    /api/functions/<function_id>/pool
+GET    /api/functions/pool/stats
+GET    /api/functions/<function_id>/invocations/<invocation_id>
+POST   /api/functions/<function_id>/rollback
 ```
 
 Create request shape:
@@ -886,9 +1021,10 @@ Create request shape:
 ```json
 {
   "name": "my-function",
+  "cluster_id": "cluster_123",
   "description": "Processes incoming data",
-  "handler": "index.handler",
-  "runtime": "nodejs",
+  "handler": "echo hello",
+  "runtime": "shell",
   "memory_limit_mb": 256,
   "cpu_limit_percent": 25.0,
   "timeout_seconds": 30,
@@ -922,13 +1058,14 @@ Invocation response shape:
   "function_id": "uuid",
   "function_name": "my-function",
   "execution_node_id": "node-a",
-  "status": "completed",
-  "started_at": "2026-02-02T12:00:00Z",
-  "ended_at": "2026-02-02T12:00:01Z",
+  "status": "success",
+  "started_at": 1760000000,
+  "ended_at": 1760000001,
   "duration_ms": 1200,
   "exit_code": 0,
   "stdout": "Result output",
   "stderr": "",
+  "error_message": null,
   "cold_start": true
 }
 ```
@@ -947,14 +1084,29 @@ Pool status shape:
 
 Important semantics:
 
+- `runtime` is optional and defaults to `shell`
 - create returns a pending function record and starts the versioned lifecycle
 - update creates a new version rather than mutating the active version in place
-- `deploy` warms and starts capacity; `ready_count` only reflects containers that are already started and invocable
+- `deploy` warms and starts capacity
+- `ready_count` only reflects containers that are already started and invocable
 - `pause` scales the function to zero
-- `resume` makes a paused function eligible for execution again
-- GET/list function routes are read-only; owner reassignment happens on control-plane or mutating execution paths, not on reads
+- `resume` routes through the deploy path and makes the function eligible for execution again
+- GET and list function routes are read-only
 - `owner_node_id` is the node responsible for deployment and warm-pool reconciliation
 - `execution_node_id` is the node that actually ran the invocation
-- `cold_start` should be treated as execution metadata, not as an error condition
+- `cold_start` is execution metadata, not an error condition
 
 Agent rule: when diagnosing serverless behavior, inspect function state, recent invocations, and pool status together before changing configuration.
+
+## Practical Decision Rules
+
+- If the platform may be down, check `GET /health` first.
+- If the task is about a specific runtime, resolve the container and check readiness before mutating it.
+- If a mutation is async, track the operation instead of issuing duplicate requests.
+- If shell parsing is required, invoke the shell explicitly in argv form.
+- If state must persist across container replacement, use volumes.
+- If state must be reproducible, snapshot first and clone from that snapshot.
+- If you want a writable branch of a live container, use container fork.
+- If diagnosing connectivity, inspect container network diagnostics before changing routes or IP assignments.
+- If the task is interactive, prefer terminal sessions over ad hoc exec polling.
+- If the task is about clusters, nodes, workloads, placements, join tokens, or Kubernetes manifests, use the cluster and agent patterns in this guide.
