@@ -105,8 +105,10 @@ Important semantics:
 
 - `create`, `start`, `stop`, `resume`, and delete are operation-driven and should return `202`
 - readiness should be checked explicitly; do not assume a created or resumed container is ready yet
-- `ready` means the container is command-ready for exec, terminal, filesystem, and normal agent operations
-- `checks.workload_ready` is the workload-specific health signal; it may be `false` for valid dev or worker containers such as `sleep infinity`
+- `ready` currently means the container is running and its `minit` control socket is responsive
+- `init_ready` mirrors `minit` socket responsiveness
+- `checks` currently reports `state_running`, `minit_responsive`, and `network_configured`
+- `ready` is the exec gate for the HTTP exec API; it is not a workload-specific application health signal and it does not imply GUI backend readiness
 - resolving by name is helpful, but IDs are the safer handle once a target is known
 
 Create request shape:
@@ -683,10 +685,10 @@ Agent rule: inspect network diagnostics before assuming a connectivity issue is 
 Primary route:
 
 ```text
-GET /api/containers/<container_id>/gui
+GET /api/containers/<container_id>/gui-url
 ```
 
-Use GUI access only for `prod-gui` containers. The signed GUI route returns `302 Found` with a `Location` header pointing at `/gui/<container_id>/?gui_token=...`. It only succeeds when the container is running, network-ready, and serving the GUI backend.
+Use GUI access only for `prod-gui` containers. This route returns JSON containing a signed `gui_url` under `/gui/<container_id>/?gui_token=...`. It only succeeds when the container is running, has an IP address, and the GUI backend is reachable.
 
 GUI-capable container create shape:
 
@@ -708,8 +710,9 @@ GUI-capable container create shape:
 Typical GUI flow:
 
 1. Create a container from a GUI-capable image such as `prod-gui`.
-2. Wait for the container to become ready.
-3. Request `GET /api/containers/<container_id>/gui` and follow the returned `Location` header.
+2. Wait for the container to become exec-ready via `GET /api/containers/<container_id>/ready`.
+3. Request `GET /api/containers/<container_id>/gui-url`.
+4. Open the returned `gui_url` value as-is.
 
 Notes:
 
@@ -717,10 +720,10 @@ Notes:
 - `prod-gui` does not accept a custom `command`; the GUI supervisor is the canonical container command.
 - `prod-gui` is Ubuntu-based and includes `apt`, XFCE/noVNC, Rust/Cargo/CMake, and native X11/GTK build dependencies.
 - Inside a running GUI container, `qgui env` prints the managed session variables and `qgui run -- <command...>` launches desktop apps without manual `DISPLAY` or DBus wiring.
-- The signed redirect target lands on Quilt's container-scoped noVNC proxy under `/gui/<container_id>/...`.
+- The returned `gui_url` lands on Quilt's container-scoped noVNC proxy under `/gui/<container_id>/...`.
 - Quilt rewrites the served noVNC entrypoint so browser assets and the VNC websocket stay container-scoped at `gui/<container_id>/websockify`.
-- `GET /api/containers/<container_id>/gui-url` is intentionally absent and should return `404`.
-- Use the signed `Location` value as returned; do not rewrite the path or point the browser at `/websockify` directly.
+- `GET /api/containers/<container_id>/gui` is not part of the current HTTP API contract.
+- Use the returned `gui_url` value as-is; do not rewrite the path or point the browser at `/websockify` directly.
 
 ## ICC
 
