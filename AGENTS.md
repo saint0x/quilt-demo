@@ -1,6 +1,6 @@
 # Quilt Platform Agent Guide
 
-This file is the standalone agent guide for the Quilt platform. Treat it as the operational reference for the backend behavior implemented in `quilt-prod`, with examples and route names aligned to the live HTTP surface.
+This file is the standalone agent guide for the Quilt platform. Treat it as the operational reference for the platform resources, API contracts, orchestration flows, and the agent-facing operating model.
 
 ## Scope
 
@@ -289,11 +289,11 @@ POST /api/elasticity/control/actions/<action_id>/rollback
 Important semantics:
 
 - resize is part of elasticity; there is no separate resize model outside this section
-- tenant-facing elasticity routes mutate the target directly and return updated state synchronously
-- control routes are orchestrator-facing and are operation-driven
+- direct elasticity routes mutate the target directly and return updated state synchronously
+- control routes are operation-driven
 - all elasticity routes require `X-Tenant-Id`, and the header must match the authenticated tenant
 - control writes also require `Idempotency-Key` and `X-Orch-Action-Id`
-- the control contract route is the source of truth for backend-owned elasticity endpoints
+- the control contract route is the source of truth for elasticity control endpoints
 
 Resize payload:
 
