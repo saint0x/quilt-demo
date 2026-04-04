@@ -53,6 +53,12 @@ GET /api/system/info
 
 Agent rule: confirm platform health before diagnosing higher-level failures.
 
+Health rule:
+
+- `GET /health` is liveness only
+- before runtime mutations, use the concern-specific health route such as `GET /api/containers/health`, `GET /api/functions/health`, or `GET /api/elasticity/health`
+- do not treat `/health` as a container-capacity or runtime-readiness signal
+
 ## Concern Guides
 
 The backend exposes concern-scoped discovery endpoints for major API families. Use:
@@ -1062,6 +1068,11 @@ Create request shape:
 }
 ```
 
+Notes:
+
+- the function create contract does not include a `source_code` field
+- function create is defined by `handler`, `runtime`, and the runtime-owned execution image
+
 Invocation request shape:
 
 ```json
@@ -1124,7 +1135,7 @@ Agent rule: when diagnosing serverless behavior, inspect function state, recent 
 
 ## Practical Decision Rules
 
-- If the platform may be down, check `GET /health` first.
+- If the platform may be down, check `GET /health` for liveness first, then use the relevant concern health endpoint before runtime mutations.
 - If the task is about a specific runtime, resolve the container and check readiness before mutating it.
 - If a mutation is async, track the operation instead of issuing duplicate requests.
 - If shell parsing is required, invoke the shell explicitly in argv form.
