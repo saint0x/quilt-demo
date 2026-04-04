@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "example:stress": "node --env-file=.env --import tsx examples/production-stress.ts",
     "examples:all": "npm run example:containers && npm run example:images && npm run example:sdk && npm run example:clusters && npm run example:terminal && npm run example:elasticity && npm run example:lifecycle",
     "example:containers": "node --env-file=.env --import tsx examples/containers-volumes-and-network.ts",
     "example:images": "node --env-file=.env --import tsx examples/docker-and-oci-images.ts",
