@@ -24,6 +24,7 @@ async function main(): Promise<void> {
 		lines.push(
 			`public create ok operation=${operationId} container=${containerId}`,
 		);
+		await waitForContainerReady(client, containerId);
 
 		const listed = (await client.containers.list()) as {
 			containers: Array<Record<string, unknown>>;
@@ -43,8 +44,10 @@ async function main(): Promise<void> {
 			"SDK container get mismatch",
 		);
 		assert(String(byName.container_id) === containerId, "SDK byName mismatch");
-		assert(ready.ready === true, "SDK ready check failed");
-		lines.push(`containers.get/byName/ready ok for ${name}`);
+		assert(ready.exec_ready === true, "SDK ready check failed");
+		lines.push(
+			`containers.get/byName/ready ok for ${name} exec_ready=${ready.exec_ready} network_ready=${ready.network_ready}`,
+		);
 
 		await client.platform.patchContainerEnv(containerId, {
 			SDK_PATCH: "1",
@@ -302,6 +305,22 @@ async function createPublicContainer(
 		`container create for ${name} did not yield a container_id`,
 	);
 	return { containerId, name, operationId: accepted.operation_id };
+}
+
+async function waitForContainerReady(
+	client: QuiltClient,
+	containerId: string,
+	timeoutMs = 180_000,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const ready = await client.platform.checkContainerReady(containerId);
+		if (ready.exec_ready === true && ready.network_ready === true) {
+			return;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 500));
+	}
+	throw new Error(`container ${containerId} did not become ready within ${timeoutMs}ms`);
 }
 
 async function deletePublicContainer(

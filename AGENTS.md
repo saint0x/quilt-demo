@@ -113,10 +113,11 @@ Important semantics:
 - `create`, `batch create`, `start`, `stop`, `resume`, `fork`, and delete are operation-driven and return `202`
 - `kill` and `rename` are direct mutations, not operation handles
 - readiness should be checked explicitly; do not assume a created, started, resumed, or forked container is ready yet
-- `ready` means the container is running and its `minit` control socket is responsive
-- `init_ready` mirrors `minit` socket responsiveness
-- `checks` reports `state_running`, `minit_responsive`, and `network_configured`
-- `ready` is the exec gate for the HTTP exec API; it is not an application health signal and it does not imply GUI backend readiness
+- `exec_ready` means the container is running, its `minit` control socket is responsive, and the managed image contract validates
+- `network_ready` reports network allocation separately from exec readiness
+- `gui_ready` is only present for `prod-gui` containers and adds GUI backend reachability on top of `exec_ready` plus `network_ready`
+- `checks` reports `state_running`, `minit_responsive`, `network_configured`, and `managed_image_valid`; `gui_backend_reachable` is included for `prod-gui`
+- `exec_ready` is the exec gate for the HTTP exec API; it is not an application health signal and it does not imply GUI backend readiness unless `gui_ready` is also true
 - resolving by name is convenient, but IDs are the safer handle once a target is known
 
 Create request shape:
@@ -762,7 +763,7 @@ GUI-capable container create shape:
 Typical GUI flow:
 
 1. Create a container from `prod-gui`.
-2. Wait for `GET /api/containers/<container_id>/ready`.
+2. Poll `GET /api/containers/<container_id>/ready` until `exec_ready=true`, `network_ready=true`, and for GUI workloads `gui_ready=true`.
 3. Request `GET /api/containers/<container_id>/gui-url`.
 4. Open the returned `gui_url` value as-is.
 
