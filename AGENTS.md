@@ -69,6 +69,8 @@ The backend exposes concern-scoped discovery endpoints for major API families. U
 
 Use them for route-family discovery, canonical payloads, and concern-scoped readiness. Default format is JSON; `?format=markdown` or `Accept: text/markdown` returns Markdown.
 
+OCI image management is covered by the `oci` concern, including authenticated `GET /api/oci/help`, `GET /api/oci/examples`, and `GET /api/oci/health`.
+
 ## Core Resource Model
 
 Think in terms of stable resources:
