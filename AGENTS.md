@@ -401,6 +401,7 @@ Primary route:
 
 ```text
 POST /api/containers/<container_id>/exec
+POST /api/containers/<container_id>/stream
 ```
 
 Exec request shape:
@@ -419,6 +420,8 @@ Important semantics:
 - exec is submit-and-track; the route returns a job handle immediately
 - shell behavior is explicit, not implied: if shell parsing is required, invoke `["/bin/sh", "-lc", "..."]` or another interpreter directly
 - the container must be running and `minit` must be healthy, or exec is rejected
+- `/stream` is the live non-PTY output surface and returns `application/x-ndjson`, one JSON frame per line
+- `stdout` and `stderr` stream frames carry base64-encoded bytes in `data_b64`
 
 Exec accepted response:
 
@@ -449,6 +452,28 @@ Observed job statuses:
 - `timeout`
 
 Agent rule: exec is always job-driven. Submit the command, then inspect the job record for completion and output.
+
+Live stream request shape:
+
+```json
+{
+  "command": ["/bin/sh", "-lc", "echo hello && echo warn 1>&2"],
+  "working_directory": "/app",
+  "environment": {
+    "NODE_ENV": "production"
+  },
+  "timeout_ms": 30000
+}
+```
+
+Live stream example frames:
+
+```json
+{"type":"started","container_id":"ctr_123","pid":1234}
+{"type":"stdout","data_b64":"aGVsbG8K"}
+{"type":"stderr","data_b64":"d2Fybgo="}
+{"type":"exit","code":0,"elapsed_ms":25}
+```
 
 ## Operations
 
@@ -802,7 +827,7 @@ Important semantics:
 - the WebSocket path can attach an existing session or create a fresh one when `session_id` is omitted and `container_id` is provided
 - terminal sessions are tenant-scoped and capped per tenant
 
-Agent rule: use terminal sessions for interactive shell behavior; use exec jobs for non-interactive command execution.
+Agent rule: use terminal sessions for interactive shell behavior, `/stream` for live non-PTY output consumption, and exec jobs for submit-and-track execution.
 
 ## GUI Access
 
