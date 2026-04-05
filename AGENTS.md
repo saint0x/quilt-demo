@@ -876,6 +876,7 @@ POST /api/icc/replay
 POST /api/icc/dlq/<stream_seq>/replay
 POST /api/containers/<container_id>/icc/publish
 POST /api/containers/<container_id>/inbox/ack
+POST /api/containers/<container_id>/inbox/replay
 POST /api/icc/inbox/<container_id>/ack
 POST /api/icc/messages/<msg_id>/ack
 POST /api/icc/inbox/<container_id>/replay
