@@ -165,6 +165,7 @@ Notes:
 - `strict` is a boolean when supplied
 - `strict` is echoed back on container detail and list responses so post-create hardening can be verified
 - `prod-gui` is a special managed image and does not accept a custom `command`
+- deterministic GPU request failures are rejected before an operation is created: invalid GPU shapes return `400`, plan-gated requests return `403`, and unavailable host GPU capacity returns `503 CAPACITY_FULL` with a hint
 
 Rename payload:
 
@@ -280,6 +281,7 @@ Important semantics:
 - raw `/dev/nvidia*` bind mounts remain blocked
 - `gpu_count` is the primary request field
 - `gpu_ids` is optional explicit pinning and must exactly match `gpu_count` when used
+- deterministic GPU request failures are rejected before an operation is created: invalid GPU shapes return `400`, plan gating returns `403`, and unavailable host GPU capacity returns `503 CAPACITY_FULL` with a hint
 - node GPU inventory is agent-reported control-plane state
 - cluster node list and node detail responses expose that persisted inventory as `gpu_inventory`
 - scheduler placement must satisfy GPU inventory before assigning a workload
@@ -547,6 +549,11 @@ Snapshot create response:
   "status_url": "/api/operations/op_123"
 }
 ```
+
+Snapshot list, detail, and lineage responses return the stable source container handle as
+`source_container_id` and also return `source_container_name` captured from the embedded
+source container config at snapshot creation time. `source_container_name` may be `null`
+if the source container had no name.
 
 Clone payload:
 
