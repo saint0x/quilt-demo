@@ -121,6 +121,8 @@ Important semantics:
 - `create`, `batch create`, `start`, `stop`, `resume`, `fork`, and delete are operation-driven and return `202`
 - `POST /api/containers/<container_id>/snapshot` is also operation-driven and returns `202 {success, operation_id, status_url}`
 - `kill` and `rename` are direct mutations, not operation handles
+- `GET /api/containers/<container_id>` returns the runtime status object, not a full create-time spec; it does not include image, command, environment, or volume attachments
+- `GET /api/containers/by-name/<name>` is a resolver that returns only `container_id`
 - readiness should be checked explicitly; do not assume a created, started, resumed, or forked container is ready yet
 - `exec_ready` means the container is running, its `minit` control socket is responsive, and the managed image contract validates
 - `network_ready` reports network allocation separately from exec readiness
@@ -310,11 +312,12 @@ Important semantics:
 
 - resize is part of elasticity; there is no separate resize model outside this section
 - direct elasticity routes mutate the target directly and return updated state synchronously
-- control routes are operation-driven
+- control routes persist durable operation records but execute inline and return the current operation body immediately
 - all elasticity routes require `X-Tenant-Id`, and the header must match the authenticated tenant
 - control writes also require `Idempotency-Key` and `X-Orch-Action-Id`
 - the control contract route is the source of truth for elasticity control endpoints
 - `control_base_url` is derived from the request-visible public base URL; examples may use `https://backend.quilt.sh`, but the runtime value is not hardcoded
+- control-route responses are not guaranteed to include `status_url`
 
 Resize payload:
 
@@ -453,8 +456,15 @@ Operation lookup:
 
 ```text
 GET /api/operations/<operation_id>
+```
+
+Streaming events:
+
+```text
 GET /api/events
 ```
+
+`GET /api/events` is an SSE stream that returns `text/event-stream`, not a JSON array.
 
 Accepted response shape:
 
@@ -499,6 +509,14 @@ Container fork route:
 ```text
 POST /api/containers/<container_id>/fork
 ```
+
+Snapshot, clone, fork, pin, unpin, lineage, list, and delete routes also require:
+
+```text
+X-Tenant-Id: <tenant_id>
+```
+
+The header must match the authenticated tenant.
 
 Snapshot creation payload:
 
@@ -740,6 +758,7 @@ Operator-surface semantics:
 - `GET /api/activity` is tenant-scoped and only accepts `limit`
 - notifications are tenant-scoped and the current list route does not take a `limit` query param
 - `POST /api/containers/<id>/cleanup/force` requires `confirm=true`
+- `POST /api/containers/<id>/cleanup/force` only runs against stopped containers
 - monitor routes distinguish monitor records, monitoring processes, and per-container monitor status
 
 Agent rule: inspect network diagnostics before assuming a connectivity issue is application-level.
@@ -771,7 +790,7 @@ Create session payload:
 Important semantics:
 
 - `POST /api/terminal/sessions` creates a managed session and returns `201`
-- the response includes `attach_url`, which points at `wss://backend.quilt.sh/ws/terminal/attach?session_id=...`
+- the response includes `attach_url`, which is derived from `APP_BASE_URL`, then `BACKEND_DOMAIN`, then forwarded/request host headers; it is not hardcoded to one Quilt hostname
 - the WebSocket attach route requires the `terminal` subprotocol
 - the WebSocket path can attach an existing session or create a fresh one when `session_id` is omitted and `container_id` is provided
 - terminal sessions are tenant-scoped and capped per tenant
@@ -809,12 +828,13 @@ Typical GUI flow:
 1. Create a container from `prod-gui`.
 2. Poll `GET /api/containers/<container_id>/ready` until `exec_ready=true`, `network_ready=true`, and for GUI workloads `gui_ready=true`.
 3. Request `GET /api/containers/<container_id>/gui-url`.
-4. Open the returned `gui_url` value as-is.
+4. Open the returned `gui_url` relative to the backend's public host, or let the browser resolve it on that host directly.
 
 Notes:
 
 - `prod-gui` starts the GUI stack automatically
 - `prod-gui` does not accept a custom `command`
+- `gui_url` is typically returned as a relative path under `/gui/<container_id>/...`
 - the returned `gui_url` lands on Quilt's container-scoped noVNC proxy under `/gui/<container_id>/...`
 - Quilt rewrites the served noVNC entrypoint so browser assets and the VNC websocket stay container-scoped at `/gui/<container_id>/websockify`
 - `GET /api/containers/<container_id>/gui` is not part of the current HTTP API contract
@@ -833,7 +853,7 @@ GET  /api/icc/schema
 GET  /api/icc/types
 GET  /api/icc/proto
 GET  /api/icc/descriptor
-GET  /api/icc/messages?container_id=<id>&limit=<n>
+GET  /api/icc/messages?container_id=<tenant_owned_container_id>&limit=<n>
 GET  /api/icc/inbox/<container_id>
 GET  /api/icc/containers/<container_id>/state-version
 GET  /api/icc/dlq
@@ -909,6 +929,12 @@ Replay payload:
 }
 ```
 
+Important semantics:
+
+- `GET /api/icc/messages` requires `container_id`; omitting it is a request error
+- inbox, replay, and state-version reads require a real tenant-owned container id
+- placeholder ids in examples are illustrative, not copy-paste runnable against an arbitrary tenant
+
 Agent rule: use ICC when containers need direct local messaging with a real protocol. Do not reach for it when normal HTTP is the actual requirement.
 
 ## Clusters, Agents, And Kubernetes Compatibility
@@ -960,6 +986,13 @@ GET  /api/k8s/resources/<resource_id>
 DELETE /api/k8s/resources/<resource_id>
 ```
 
+Kubernetes compatibility parameter rules:
+
+- `POST /api/k8s/validate` uses singular `manifest` in the JSON body and does not require `cluster_id`
+- `POST /api/k8s/diff`, `POST /api/k8s/apply`, and `POST /api/k8s/export` require `cluster_id` in the JSON body
+- `GET /api/k8s/applies/<operation_id>`, `GET /api/k8s/resources`, `GET /api/k8s/resources/<resource_id>`, and `DELETE /api/k8s/resources/<resource_id>` require `cluster_id` in the query string
+- `POST /api/k8s/apply` returns `202`, but the body is immediate and already includes `operation_id`, `status`, `summary`, `warnings`, `errors`, and `diff`
+
 Important auth headers:
 
 - join token registration uses `X-Quilt-Join-Token`
@@ -987,6 +1020,7 @@ Important semantics:
 
 - the live node registration HTTP route is `POST /api/agent/clusters/<cluster_id>/nodes/register`
 - the request body must include `name`, `bridge_name`, `dns_port`, and `egress_limit_mbit`
+- the response shape is nested as `node`, `allocation`, and `node_token`; there is no flat `node_id` top-level field
 - join tokens are minted through the tenant route and then presented to the agent route
 - `GET /api/clusters/<cluster_id>/nodes` and `GET /api/clusters/<cluster_id>/nodes/<node_id>` expose persisted `gpu_inventory`
 - after deregistration, a node is no longer part of the cluster read surface; do not treat deleted nodes as stable tombstone records
