@@ -119,6 +119,7 @@ DELETE /api/containers/<container_id>
 Important semantics:
 
 - `create`, `batch create`, `start`, `stop`, `resume`, `fork`, and delete are operation-driven and return `202`
+- `POST /api/containers/<container_id>/snapshot` is also operation-driven and returns `202 {success, operation_id, status_url}`
 - `kill` and `rename` are direct mutations, not operation handles
 - readiness should be checked explicitly; do not assume a created, started, resumed, or forked container is ready yet
 - `exec_ready` means the container is running, its `minit` control socket is responsive, and the managed image contract validates
@@ -160,7 +161,16 @@ Notes:
 - use `volumes`, not `mounts`, for persistent volume attachment during container create
 - volume attachment strings use `<volume-name>:<target-path>`
 - `strict` is a boolean when supplied
+- `strict` is echoed back on container detail and list responses so post-create hardening can be verified
 - `prod-gui` is a special managed image and does not accept a custom `command`
+
+Rename payload:
+
+```json
+{
+  "new_name": "renamed-container"
+}
+```
 
 Batch payload contract:
 
@@ -269,6 +279,7 @@ Important semantics:
 - `gpu_count` is the primary request field
 - `gpu_ids` is optional explicit pinning and must exactly match `gpu_count` when used
 - node GPU inventory is agent-reported control-plane state
+- cluster node list and node detail responses expose that persisted inventory as `gpu_inventory`
 - scheduler placement must satisfy GPU inventory before assigning a workload
 
 ## Elasticity
@@ -303,6 +314,7 @@ Important semantics:
 - all elasticity routes require `X-Tenant-Id`, and the header must match the authenticated tenant
 - control writes also require `Idempotency-Key` and `X-Orch-Action-Id`
 - the control contract route is the source of truth for elasticity control endpoints
+- `control_base_url` is derived from the request-visible public base URL; examples may use `https://backend.quilt.sh`, but the runtime value is not hardcoded
 
 Resize payload:
 
@@ -343,7 +355,7 @@ Workload function rotation payload:
 ```json
 {
   "next_function_id": "fn_456",
-  "cutover_at": 1774200000
+  "cutover_at": 1893456000
 }
 ```
 
@@ -364,6 +376,8 @@ Node group scale payload:
 }
 ```
 
+`delta_units` must be non-zero. Positive values request scale-out; negative values request scale-in.
+
 Rollback payload:
 
 ```json
@@ -373,6 +387,8 @@ Rollback payload:
   "reason_message": "rollback requested by orchestrator"
 }
 ```
+
+`target_action_id` is required and requests missing it are rejected before mutation.
 
 ## Exec Contract
 
@@ -498,6 +514,22 @@ Snapshot creation payload:
 }
 ```
 
+Accepted values:
+
+- `consistency_mode`: `crash-consistent`, `app-consistent`
+- `network_mode`: `reset`, `preserve_ns`, `preserve_conn_best_effort`
+- `volume_mode`: `exclude`, `include_named`, `include_all_allowed`
+
+Snapshot create response:
+
+```json
+{
+  "success": true,
+  "operation_id": "op_123",
+  "status_url": "/api/operations/op_123"
+}
+```
+
 Clone payload:
 
 ```json
@@ -509,6 +541,8 @@ Clone payload:
   }
 }
 ```
+
+Accepted `resume_policy` values: `manual`, `immediate`.
 
 Fork payload:
 
@@ -524,6 +558,8 @@ Fork payload:
   }
 }
 ```
+
+Fork rejects invalid `resume_policy` values during request validation; it does not defer that enum failure to the async worker.
 
 Agent rule:
 
@@ -797,7 +833,7 @@ GET  /api/icc/schema
 GET  /api/icc/types
 GET  /api/icc/proto
 GET  /api/icc/descriptor
-GET  /api/icc/messages?container_identifier=<id>&limit=<n>
+GET  /api/icc/messages?container_id=<id>&limit=<n>
 GET  /api/icc/inbox/<container_id>
 GET  /api/icc/containers/<container_id>/state-version
 GET  /api/icc/dlq
@@ -861,11 +897,13 @@ Ack payload:
 }
 ```
 
+Accepted `action` values: `ack`, `nack`.
+
 Replay payload:
 
 ```json
 {
-  "container_identifier": "ctr_123",
+  "container_id": "ctr_123",
   "state": "acked",
   "limit": 10
 }
@@ -950,6 +988,8 @@ Important semantics:
 - the live node registration HTTP route is `POST /api/agent/clusters/<cluster_id>/nodes/register`
 - the request body must include `name`, `bridge_name`, `dns_port`, and `egress_limit_mbit`
 - join tokens are minted through the tenant route and then presented to the agent route
+- `GET /api/clusters/<cluster_id>/nodes` and `GET /api/clusters/<cluster_id>/nodes/<node_id>` expose persisted `gpu_inventory`
+- after deregistration, a node is no longer part of the cluster read surface; do not treat deleted nodes as stable tombstone records
 
 ## `quiltc` Control Plane CLI
 
@@ -995,12 +1035,12 @@ quiltc agent register <cluster_id> --join-token <join_token> --name node-a --pub
 quiltc agent heartbeat <cluster_id> <node_id> --state ready
 
 # Desired-state scheduling
-quiltc clusters workload-create <cluster_id> '{"name":"demo","replicas":3,"command":["sh","-lc","echo hi; tail -f /dev/null"],"memory_limit_mb":128}'
+quiltc clusters workload-create <cluster_id> '{"name":"demo","replicas":3,"command":["sh","-lc","echo hi; tail -f /dev/null"],"memory_limit_mb":256}'
 quiltc clusters reconcile <cluster_id>
 quiltc clusters placements <cluster_id>
 
 # Runtime surface
-quiltc containers create '{"name":"demo","command":["sh","-lc","echo hi; tail -f /dev/null"],"memory_limit_mb":128}'
+quiltc containers create '{"name":"demo","command":["sh","-lc","echo hi; tail -f /dev/null"],"memory_limit_mb":256}'
 quiltc containers exec <container_id> -- sh -lc 'id && ip addr && ip route'
 quiltc operations watch <operation_id> --timeout-secs 300
 
@@ -1074,6 +1114,8 @@ Notes:
 
 - the function create contract does not include a `source_code` field
 - function create is defined by `handler`, `runtime`, and the runtime-owned execution image
+- `memory_limit_mb` must be at least `256`
+- `working_directory`, when set, must already exist in the runtime's execution image
 
 Invocation request shape:
 
@@ -1119,6 +1161,19 @@ Pool status shape:
 }
 ```
 
+Global pool stats shape:
+
+```json
+{
+  "total_count": 4,
+  "warming_count": 1,
+  "ready_count": 2,
+  "busy_count": 1,
+  "recycling_count": 0,
+  "terminating_count": 0
+}
+```
+
 Important semantics:
 
 - `runtime` is optional and defaults to `shell`
@@ -1132,6 +1187,7 @@ Important semantics:
 - `owner_node_id` is the node responsible for deployment and warm-pool reconciliation
 - `execution_node_id` is the node that actually ran the invocation
 - `cold_start` is execution metadata, not an error condition
+- `POST /api/functions/<function_id>/rollback` requires a body exactly shaped as `{"version": <n>}`
 
 Agent rule: when diagnosing serverless behavior, inspect function state, recent invocations, and pool status together before changing configuration.
 
