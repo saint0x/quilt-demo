@@ -24,6 +24,7 @@ type TestResult = {
 type CreatedContainer = {
 	containerId: string;
 	name: string;
+	tenantId: string;
 };
 
 const client = QuiltClient.connect({
@@ -146,7 +147,12 @@ async function main(): Promise<void> {
 		await client.platform.replaceContainerEnv(target.containerId, {
 			STRESS_REPLACED: "true",
 		});
-		const replaced = await client.platform.getContainerEnv(target.containerId);
+		const replaced = await waitForEnvironment(
+			target.containerId,
+			(environment) =>
+				environment.STRESS_REPLACED === "true" && !("STRESS_KEEP" in environment),
+			30_000,
+		);
 		assert(
 			replaced.environment.STRESS_REPLACED === "true",
 			"env replace missing key",
@@ -260,17 +266,29 @@ async function main(): Promise<void> {
 
 	await attempt("snapshots-clone-fork-lineage", async () => {
 		const target = containers[0];
-		const snapshot = (await client.containers.snapshot(
+		const snapshotHeaders = { "X-Tenant-Id": target.tenantId };
+		const snapshotAccepted = (await client.containers.snapshot(
 			target.containerId,
 			{},
+			snapshotHeaders,
 		)) as Record<string, unknown>;
-		const snapshotId = String(snapshot.snapshot_id ?? "");
+		const snapshotOperation = await client.awaitOperation(
+			String(snapshotAccepted.operation_id),
+			{ timeoutMs: 180_000 },
+		);
+		const snapshotId = String(
+			(snapshotOperation.result as Record<string, unknown> | undefined)
+				?.snapshot_id ??
+				(snapshotOperation as Record<string, unknown>).snapshot_id ??
+				"",
+		);
 		assert(snapshotId, "snapshot_id missing");
 		cleanup.defer(async () => {
-			try {
-				await client.raw("delete", "/api/snapshots/{snapshot_id}", {
-					pathParams: { snapshot_id: snapshotId },
-				});
+				try {
+					await client.raw("delete", "/api/snapshots/{snapshot_id}", {
+						pathParams: { snapshot_id: snapshotId },
+						headers: snapshotHeaders,
+					});
 			} catch (error) {
 				if (!isNotFound(error)) {
 					throw error;
@@ -278,29 +296,32 @@ async function main(): Promise<void> {
 			}
 		});
 
-		const lineage = (await client.raw(
-			"get",
-			"/api/snapshots/{snapshot_id}/lineage",
-			{
+			const lineage = (await client.raw(
+				"get",
+				"/api/snapshots/{snapshot_id}/lineage",
+				{
+					pathParams: { snapshot_id: snapshotId },
+					headers: snapshotHeaders,
+				},
+			)) as Record<string, unknown>;
+			const pin = (await client.raw("post", "/api/snapshots/{snapshot_id}/pin", {
 				pathParams: { snapshot_id: snapshotId },
-			},
-		)) as Record<string, unknown>;
-		const pin = (await client.raw("post", "/api/snapshots/{snapshot_id}/pin", {
-			pathParams: { snapshot_id: snapshotId },
-		})) as Record<string, unknown>;
-		const unpin = (await client.raw(
-			"post",
-			"/api/snapshots/{snapshot_id}/unpin",
-			{
-				pathParams: { snapshot_id: snapshotId },
-			},
-		)) as Record<string, unknown>;
+				headers: snapshotHeaders,
+			})) as Record<string, unknown>;
+			const unpin = (await client.raw(
+				"post",
+				"/api/snapshots/{snapshot_id}/unpin",
+				{
+					pathParams: { snapshot_id: snapshotId },
+					headers: snapshotHeaders,
+				},
+			)) as Record<string, unknown>;
 		assert(pin.success === true, "snapshot pin failed");
 		assert(unpin.success === true, "snapshot unpin failed");
 
-		const cloneAccepted = await client.platform.cloneSnapshot(snapshotId, {
-			name: `${PREFIX}-clone`,
-		});
+			const cloneAccepted = await client.platform.cloneSnapshot(snapshotId, {
+				name: `${PREFIX}-clone`,
+			}, "async", snapshotHeaders);
 		const cloneOperation = await client.awaitOperation(
 			String(cloneAccepted.operation_id),
 			{ timeoutMs: 180_000 },
@@ -315,7 +336,7 @@ async function main(): Promise<void> {
 
 		const forkAccepted = await client.platform.forkContainer(target.containerId, {
 			name: `${PREFIX}-fork`,
-		});
+		}, "async", snapshotHeaders);
 		const forkOperation = await client.awaitOperation(
 			String(forkAccepted.operation_id),
 			{ timeoutMs: 180_000 },
@@ -328,11 +349,12 @@ async function main(): Promise<void> {
 		assert(forkId, "fork operation did not yield container_id");
 		cleanup.defer(async () => deleteContainer(forkId));
 
-		return [
-			`snapshot=${snapshotId}`,
-			`lineage_keys=${Object.keys(lineage).length}`,
-			`clone=${cloneId}`,
-			`fork=${forkId}`,
+			return [
+				`snapshot=${snapshotId}`,
+				`snapshot_status=${String(snapshotOperation.status)}`,
+				`lineage_keys=${Object.keys(lineage).length}`,
+				`clone=${cloneId}`,
+				`fork=${forkId}`,
 		];
 	});
 
@@ -987,22 +1009,25 @@ async function createBatchContainers(
 
 	const batchContainers = await Promise.all(
 		Array.from({ length: count }, async (_, index) => {
-		const name = `${PREFIX}-ctr-${index}`;
-		const record = (await client.containers.byName(name)) as Record<string, unknown>;
-		const containerId = String(record.container_id ?? "");
-		assert(containerId, `container ${name} was not created`);
-		cleanup.defer(async () => deleteContainer(containerId));
-			return { index, name, containerId };
+			const name = `${PREFIX}-ctr-${index}`;
+			const record = (await client.containers.byName(name)) as Record<string, unknown>;
+			const containerId = String(record.container_id ?? "");
+			assert(containerId, `container ${name} was not created`);
+			const container = (await client.containers.get(containerId)) as Record<string, unknown>;
+			const tenantId = String(container.tenant_id ?? "");
+			assert(tenantId, `container ${name} missing tenant_id`);
+			cleanup.defer(async () => deleteContainer(containerId));
+			return { index, name, containerId, tenantId };
 		}),
 	);
 
 	const created: CreatedContainer[] = [];
 	await Promise.all(
-		batchContainers.map(async ({ index, name, containerId }) => {
-		try {
-			await waitForReady(containerId, 120_000);
-			created.push({ containerId, name });
-		} catch (error) {
+		batchContainers.map(async ({ index, name, containerId, tenantId }) => {
+			try {
+				await waitForReady(containerId, 180_000);
+				created.push({ containerId, name, tenantId });
+			} catch (error) {
 			results.push({
 				name: `runtime-bootstrap-batch-ready-${index}`,
 				ok: false,
@@ -1060,9 +1085,12 @@ async function createSingleContainer(
 		operationContainerId(operation) ||
 		String(((await client.containers.byName(name)) as Record<string, unknown>).container_id ?? "");
 	assert(containerId, `fallback create missing container_id for ${name}`);
+	const container = (await client.containers.get(containerId)) as Record<string, unknown>;
+	const tenantId = String(container.tenant_id ?? "");
+	assert(tenantId, `fallback create missing tenant_id for ${name}`);
 	cleanup.defer(async () => deleteContainer(containerId));
-	await waitForReady(containerId, 120_000);
-	return { containerId, name };
+	await waitForReady(containerId, 180_000);
+	return { containerId, name, tenantId };
 }
 
 async function collectDiscoveryChecks(): Promise<string[]> {
@@ -1244,6 +1272,26 @@ async function waitForJob(
 		await sleep(500);
 	}
 	throw new Error(`job ${jobId} did not finish in ${timeoutMs}ms`);
+}
+
+async function waitForEnvironment(
+	containerId: string,
+	predicate: (environment: Record<string, string>) => boolean,
+	timeoutMs: number,
+): Promise<{ environment: Record<string, string> }> {
+	const started = Date.now();
+	let lastEnvironment: Record<string, string> | null = null;
+	while (Date.now() - started < timeoutMs) {
+		const env = await client.platform.getContainerEnv(containerId);
+		lastEnvironment = env.environment;
+		if (predicate(env.environment)) {
+			return env;
+		}
+		await sleep(500);
+	}
+	throw new Error(
+		`environment did not converge within ${timeoutMs}ms: ${JSON.stringify(lastEnvironment ?? {})}`,
+	);
 }
 
 async function deleteContainer(containerId: string): Promise<void> {

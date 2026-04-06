@@ -45,6 +45,8 @@ npm run example:lifecycle
 npm run examples:all
 ```
 
+The scripts expect a repo-local `.env` with `QUILT_BASE_URL` and `QUILT_API_KEY`. These examples also rely on production-correct `quilt-sdk` behavior for tenant-scoped snapshot routes and elasticity control headers.
+
 ## Client Model
 
 All programmatic flows in this directory go through `quilt-sdk`.
@@ -73,6 +75,9 @@ The SDK is organized around major platform surfaces:
 - `client.terminal` and `client.terminalRealtime` for terminal session lifecycle and WebSocket attach
 - `client.events` for SSE streams
 - `client.raw(...)` for authenticated access to backend routes that are still intentionally exposed as raw contract calls
+- snapshot, clone, fork, pin, unpin, and delete flows require `X-Tenant-Id`
+- elasticity control writes require `X-Tenant-Id`, `Idempotency-Key`, and `X-Orch-Action-Id`
+- workload function-binding control writes return an operation envelope; inspect `result.current_function_id` and `result.next_function_id`
 
 ## File Map
 

@@ -14,6 +14,8 @@ async function main(): Promise<void> {
 		"lifecycle-example",
 	);
 	cleanup.defer(async () => deletePublicContainer(client, containerId));
+	const tenantId = await getContainerTenantId(client, containerId);
+	const snapshotHeaders = { "X-Tenant-Id": tenantId };
 
 	try {
 		const initialMetrics = (await client.containers.metrics(
@@ -52,7 +54,11 @@ async function main(): Promise<void> {
 		);
 		lines.push(`stop ok state=${String(stopped.state ?? "")}`);
 
-		await client.containers.start(containerId);
+		const startAccepted = (await client.containers.start(containerId)) as {
+			operation_id?: string;
+		};
+		assert(startAccepted.operation_id, "start operation_id missing");
+		await waitForOperation(client, String(startAccepted.operation_id));
 		const restarted = await waitForContainerState(client, containerId, [
 			"running",
 		]);
@@ -97,17 +103,28 @@ async function main(): Promise<void> {
 		});
 		lines.push(`process kill ok pid=${pid}`);
 
-		const snapshot = (await client.containers.snapshot(
-			containerId,
-			{},
-		)) as Record<string, unknown>;
-		const snapshotId = String(snapshot.snapshot_id ?? "");
-		assert(snapshotId, "snapshot_id missing");
+			const snapshotAccepted = (await client.containers.snapshot(
+				containerId,
+				{},
+				snapshotHeaders,
+			)) as Record<string, unknown>;
+			const snapshotOperation = await waitForOperation(
+				client,
+				String(snapshotAccepted.operation_id),
+			);
+			const snapshotId = String(
+				(snapshotOperation.result as Record<string, unknown> | undefined)
+					?.snapshot_id ??
+					(snapshotOperation as Record<string, unknown>).snapshot_id ??
+					"",
+			);
+			assert(snapshotId, "snapshot_id missing");
 		cleanup.defer(async () => {
-			try {
-				await client.raw("delete", "/api/snapshots/{snapshot_id}", {
-					pathParams: { snapshot_id: snapshotId },
-				});
+				try {
+					await client.raw("delete", "/api/snapshots/{snapshot_id}", {
+						pathParams: { snapshot_id: snapshotId },
+						headers: snapshotHeaders,
+					});
 			} catch (error) {
 				if (isNotFound(error)) {
 					return;
@@ -117,17 +134,21 @@ async function main(): Promise<void> {
 		});
 		const pin = (await client.raw("post", "/api/snapshots/{snapshot_id}/pin", {
 			pathParams: { snapshot_id: snapshotId },
+			headers: snapshotHeaders,
 		})) as Record<string, unknown>;
 		const unpin = (await client.raw(
 			"post",
 			"/api/snapshots/{snapshot_id}/unpin",
 			{
 				pathParams: { snapshot_id: snapshotId },
+				headers: snapshotHeaders,
 			},
 		)) as Record<string, unknown>;
-		assert(pin.success === true, "snapshot pin failed");
-		assert(unpin.success === true, "snapshot unpin failed");
-		lines.push(`snapshot pin/unpin ok snapshot=${snapshotId}`);
+			assert(pin.success === true, "snapshot pin failed");
+			assert(unpin.success === true, "snapshot unpin failed");
+			lines.push(
+				`snapshot pin/unpin ok snapshot=${snapshotId} snapshot_status=${String(snapshotOperation.status)}`,
+			);
 
 		const volumeName = suffix("life-vol");
 		let renamedVolume = "";
@@ -430,6 +451,19 @@ async function createPublicContainer(
 		`container create for ${name} did not yield a container_id`,
 	);
 	return { containerId };
+}
+
+async function getContainerTenantId(
+	client: QuiltClient,
+	containerId: string,
+): Promise<string> {
+	const container = (await client.containers.get(containerId)) as Record<
+		string,
+		unknown
+	>;
+	const tenantId = String(container.tenant_id ?? "");
+	assert(tenantId, "container tenant_id missing");
+	return tenantId;
 }
 
 async function deletePublicContainer(

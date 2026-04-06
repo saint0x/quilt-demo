@@ -69,6 +69,7 @@ async function main(): Promise<void> {
 			unknown
 		>;
 		const ready = await client.platform.checkContainerReady(containerId);
+		const tenantId = String(container.tenant_id ?? "");
 		assert(Array.isArray(list.containers), "container list missing");
 		assert(
 			String(container.container_id) === containerId,
@@ -78,6 +79,7 @@ async function main(): Promise<void> {
 			String(byName.container_id) === containerId,
 			"container by-name mismatch",
 		);
+		assert(tenantId, "container tenant_id missing");
 		assert(ready.exec_ready === true, "container was not exec-ready");
 		push("containers", true, [
 			`listed=${list.containers.length}`,
@@ -97,7 +99,13 @@ async function main(): Promise<void> {
 		await client.platform.replaceContainerEnv(containerId, {
 			HTTP_VERIFY: "replaced",
 		});
-		const envAfterReplace = await client.platform.getContainerEnv(containerId);
+			const envAfterReplace = await waitForEnvironment(
+				client,
+				containerId,
+				(environment) =>
+					environment.HTTP_VERIFY === "replaced" && !("KEEP_ME" in environment),
+				30_000,
+			);
 		assert(
 			envAfterReplace.environment.HTTP_VERIFY === "replaced",
 			"env replace missing key",
@@ -121,13 +129,14 @@ async function main(): Promise<void> {
 			String(execJob.stdout ?? "").includes("http-verify-ok"),
 			"exec stdout mismatch",
 		);
-		const jobs = await client.platform.listContainerJobs(containerId);
-		const processes = (await client.raw(
-			"get",
-			`/api/containers/${containerId}/processes`,
-		)) as {
-			processes: Array<Record<string, unknown>>;
-		};
+			const jobs = await client.platform.listContainerJobs(containerId);
+			const processes = (await client.raw(
+				"get",
+				`/api/containers/${containerId}/processes`,
+			)) as {
+				processes: Array<Record<string, unknown>>;
+			};
+			const snapshotHeaders = { "X-Tenant-Id": tenantId };
 		assert(Array.isArray(jobs.jobs) && jobs.jobs.length > 0, "job list empty");
 		assert(
 			Array.isArray(processes.processes) && processes.processes.length > 0,
@@ -139,15 +148,26 @@ async function main(): Promise<void> {
 			`processes=${processes.processes.length}`,
 		]);
 
-		const snapshot = (await client.containers.snapshot(
-			containerId,
-			{},
-		)) as Record<string, unknown>;
-		const snapshotId = String(snapshot.snapshot_id ?? "");
-		assert(snapshotId, "snapshot_id missing");
+			const snapshotAccepted = (await client.containers.snapshot(
+				containerId,
+				{},
+				snapshotHeaders,
+			)) as Record<string, unknown>;
+			const snapshotOp = await waitForOperation(
+				client,
+				String(snapshotAccepted.operation_id),
+			);
+			const snapshotId = String(
+				(snapshotOp.result as Record<string, unknown> | undefined)?.snapshot_id ??
+					(snapshotOp as Record<string, unknown>).snapshot_id ??
+					"",
+			);
+			assert(snapshotId, "snapshot_id missing");
 		cleanup.defer(async () => {
 			try {
-				await client.raw("delete", `/api/snapshots/${snapshotId}`);
+					await client.raw("delete", `/api/snapshots/${snapshotId}`, {
+						headers: snapshotHeaders,
+					});
 			} catch (error) {
 				if (
 					typeof error === "object" &&
@@ -160,17 +180,19 @@ async function main(): Promise<void> {
 				throw error;
 			}
 		});
-		const snapshotGet = (await client.raw(
-			"get",
-			`/api/snapshots/${snapshotId}`,
-		)) as Record<string, unknown>;
-		const lineage = (await client.raw(
-			"get",
-			`/api/snapshots/${snapshotId}/lineage`,
-		)) as Record<string, unknown>;
-		const cloneAccepted = await client.platform.cloneSnapshot(snapshotId, {
-			name: suffix("http-clone"),
-		});
+			const snapshotGet = (await client.raw(
+				"get",
+				`/api/snapshots/${snapshotId}`,
+				{ headers: snapshotHeaders },
+			)) as Record<string, unknown>;
+			const lineage = (await client.raw(
+				"get",
+				`/api/snapshots/${snapshotId}/lineage`,
+				{ headers: snapshotHeaders },
+			)) as Record<string, unknown>;
+			const cloneAccepted = await client.platform.cloneSnapshot(snapshotId, {
+				name: suffix("http-clone"),
+			}, "async", snapshotHeaders);
 		const cloneOp = await waitForOperation(
 			client,
 			String(cloneAccepted.operation_id),
@@ -187,7 +209,7 @@ async function main(): Promise<void> {
 		}
 		const forkAccepted = await client.platform.forkContainer(containerId, {
 			name: suffix("http-fork"),
-		});
+		}, "async", snapshotHeaders);
 		const forkOp = await waitForOperation(
 			client,
 			String(forkAccepted.operation_id),
@@ -200,12 +222,13 @@ async function main(): Promise<void> {
 		if (forkContainerId) {
 			cleanup.defer(async () => deletePublicContainer(client, forkContainerId));
 		}
-		push("snapshots", true, [
-			`snapshot_id=${snapshotId}`,
-			`lineage_keys=${Object.keys(lineage).length}`,
-			`clone_status=${String(cloneOp.status)}`,
-			`fork_status=${String(forkOp.status)}`,
-			`snapshot_name=${String(snapshotGet.name ?? "")}`,
+			push("snapshots", true, [
+				`snapshot_id=${snapshotId}`,
+				`lineage_keys=${Object.keys(lineage).length}`,
+				`snapshot_status=${String(snapshotOp.status)}`,
+				`clone_status=${String(cloneOp.status)}`,
+				`fork_status=${String(forkOp.status)}`,
+				`snapshot_name=${String(snapshotGet.name ?? "")}`,
 		]);
 
 		const volumeName = suffix("http-vol");
@@ -619,6 +642,27 @@ async function waitForContainerReady(
 		await sleep(500);
 	}
 	throw new Error(`container ${containerId} did not become ready within ${timeoutMs}ms`);
+}
+
+async function waitForEnvironment(
+	client: QuiltClient,
+	containerId: string,
+	predicate: (environment: Record<string, string>) => boolean,
+	timeoutMs: number,
+): Promise<{ environment: Record<string, string> }> {
+	const started = Date.now();
+	let lastEnvironment: Record<string, string> | null = null;
+	while (Date.now() - started < timeoutMs) {
+		const env = await client.platform.getContainerEnv(containerId);
+		lastEnvironment = env.environment;
+		if (predicate(env.environment)) {
+			return env;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 500));
+	}
+	throw new Error(
+		`environment did not converge within ${timeoutMs}ms: ${JSON.stringify(lastEnvironment ?? {})}`,
+	);
 }
 
 async function deletePublicContainer(

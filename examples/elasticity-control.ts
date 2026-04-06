@@ -23,6 +23,11 @@ async function main(): Promise<void> {
 	const tenantId = String(container.tenant_id ?? "");
 	assert(tenantId, "container tenant_id missing");
 	const controlHeaders = { "X-Tenant-Id": tenantId };
+	const controlMutationHeaders = (actionId: string) => ({
+		...controlHeaders,
+		"Idempotency-Key": suffix("idem"),
+		"X-Orch-Action-Id": actionId,
+	});
 
 	try {
 		const functionName = suffix("elastic-fn");
@@ -83,11 +88,7 @@ async function main(): Promise<void> {
 				memory_limit_mb: 448,
 				cpu_limit_percent: 40,
 			},
-			{
-				...controlHeaders,
-				"Idempotency-Key": suffix("idem"),
-				"X-Orch-Action-Id": resizeActionId,
-			},
+			controlMutationHeaders(resizeActionId),
 		);
 		const controlOperationId = controlResize.operation_id;
 		assert(controlOperationId, "control resize operation_id missing");
@@ -119,11 +120,7 @@ async function main(): Promise<void> {
 				min_instances: 0,
 				max_instances: 1,
 			},
-			{
-				...controlHeaders,
-				"Idempotency-Key": suffix("idem"),
-				"X-Orch-Action-Id": controlPoolActionId,
-			},
+			controlMutationHeaders(controlPoolActionId),
 		);
 		assert(
 			controlPool.operation_type.includes("pool_target"),
@@ -161,7 +158,7 @@ async function main(): Promise<void> {
 		const binding = await client.elasticity.controlPutWorkloadFunctionBinding(
 			workloadId,
 			{ function_id: functionId },
-			controlHeaders,
+			controlMutationHeaders(suffix("elastic-binding-action")),
 		);
 		const bindingGet =
 			await client.elasticity.controlGetWorkloadFunctionBinding(
@@ -169,7 +166,7 @@ async function main(): Promise<void> {
 				controlHeaders,
 			);
 		assert(
-			binding.current_function_id === functionId,
+			binding.result?.current_function_id === functionId,
 			"workload binding put mismatch",
 		);
 		assert(
@@ -185,17 +182,13 @@ async function main(): Promise<void> {
 					node_group: "group-a",
 					anti_affinity: true,
 				},
-				{
-					...controlHeaders,
-					"Idempotency-Key": suffix("idem"),
-					"X-Orch-Action-Id": placementActionId,
-				},
+				controlMutationHeaders(placementActionId),
 			);
-		const placementGet =
-			await client.elasticity.controlGetWorkloadPlacementPreference(
-				workloadId,
-				controlHeaders,
-			);
+			const placementGet =
+				await client.elasticity.controlGetWorkloadPlacementPreference(
+					workloadId,
+					controlHeaders,
+				);
 		assert(
 			placementSet.operation_type.includes("placement_preference"),
 			"placement preference operation type mismatch",
@@ -223,17 +216,17 @@ async function main(): Promise<void> {
 		});
 		await client.functions.deploy(nextFunctionId);
 
-		const rotated =
-			await client.elasticity.controlRotateWorkloadFunctionBinding(
-				workloadId,
-				{
-					next_function_id: nextFunctionId,
-					cutover_at: Math.floor(Date.now() / 1000) + 300,
-				},
-				controlHeaders,
-			);
+			const rotated =
+				await client.elasticity.controlRotateWorkloadFunctionBinding(
+					workloadId,
+					{
+						next_function_id: nextFunctionId,
+						cutover_at: Math.floor(Date.now() / 1000) + 300,
+					},
+					controlMutationHeaders(suffix("elastic-rotate-action")),
+				);
 		assert(
-			rotated.next_function_id === nextFunctionId,
+			rotated.result?.next_function_id === nextFunctionId,
 			"workload binding rotate mismatch",
 		);
 
@@ -241,11 +234,7 @@ async function main(): Promise<void> {
 		const nodeGroupScale = await client.elasticity.controlScaleNodeGroup(
 			"group-a",
 			{ delta_units: 1 },
-			{
-				...controlHeaders,
-				"Idempotency-Key": suffix("idem"),
-				"X-Orch-Action-Id": scaleActionId,
-			},
+			controlMutationHeaders(scaleActionId),
 		);
 		assert(
 			nodeGroupScale.operation_type.includes("scale_node_group"),
@@ -256,13 +245,12 @@ async function main(): Promise<void> {
 		const rollback = await client.elasticity.controlRollbackAction(
 			resizeActionId,
 			{
-				reason: "demo rollback request",
+				target_action_id: resizeActionId,
+				target_operation_id: controlOperationId,
+				reason_code: "EXAMPLE_ROLLBACK",
+				reason_message: "demo rollback request",
 			},
-			{
-				...controlHeaders,
-				"Idempotency-Key": suffix("idem"),
-				"X-Orch-Action-Id": rollbackActionId,
-			},
+			controlMutationHeaders(rollbackActionId),
 		);
 		assert(
 			rollback.operation_type.includes("rollback_action"),

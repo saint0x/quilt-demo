@@ -22,7 +22,7 @@
   "dependencies": {
     "eventsource": "^3.0.7",
     "protobufjs": "^8.0.0",
-    "quilt-sdk": "^0.0.3",
+    "quilt-sdk": "^0.0.10",
     "ws": "^8.20.0"
   }
 }
