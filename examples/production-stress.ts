@@ -170,27 +170,20 @@ async function main(): Promise<void> {
 						],
 						workdir: "/",
 						timeout_ms: 20_000,
-					})) as { job_id: string };
-					const job = await waitForJob(container.containerId, accepted.job_id);
-					assert(
-						String(job.status ?? "") === "completed",
-						`exec job ${accepted.job_id} did not complete`,
-					);
+					})) as { exit_code?: number; stdout?: string };
+					assert(Number(accepted.exit_code ?? -1) === 0, "exec did not complete");
 					return {
-						jobId: accepted.job_id,
-						stdout: String(job.stdout ?? "").trim(),
+						stdout: String(accepted.stdout ?? "").trim(),
 					};
 				}),
 			),
 		);
 
-		const listed = await client.platform.listContainerJobs(target.containerId);
 		const processes = (await client.raw(
 			"get",
 			"/api/containers/{id}/processes",
 			{ pathParams: { id: target.containerId } },
 		)) as { processes: Array<Record<string, unknown>> };
-		assert(Array.isArray(listed.jobs), "job list malformed");
 		assert(Array.isArray(processes.processes), "process list malformed");
 		return [
 			`exec_jobs=${jobs.length}`,
@@ -218,13 +211,12 @@ async function main(): Promise<void> {
 			"container archive upload did not report success",
 		);
 
-		const verifyJob = (await client.containers.exec(target.containerId, {
+		const verifyExec = (await client.containers.exec(target.containerId, {
 			command: ["sh", "-lc", "cat /app/from-upload.txt"],
 			timeout_ms: 10_000,
-		})) as { job_id: string };
-		const verified = await waitForJob(target.containerId, verifyJob.job_id);
+		})) as { stdout?: string };
 		assert(
-			String(verified.stdout ?? "").includes("container-archive-ok"),
+			String(verifyExec.stdout ?? "").includes("container-archive-ok"),
 			"container archive contents not visible in exec",
 		);
 
@@ -535,13 +527,12 @@ async function main(): Promise<void> {
 		assert(containerId, "oci container id missing");
 		cleanup.defer(async () => deleteContainer(containerId));
 
-		const execAccepted = (await client.containers.exec(containerId, {
+		const execResult = (await client.containers.exec(containerId, {
 			command: ["sh", "-lc", "echo oci-image-ok"],
 			timeout_ms: 10_000,
-		})) as { job_id: string };
-		const job = await waitForJob(containerId, execAccepted.job_id);
+		})) as { stdout?: string };
 		assert(
-			String(job.stdout ?? "").includes("oci-image-ok"),
+			String(execResult.stdout ?? "").includes("oci-image-ok"),
 			"oci exec stdout mismatch",
 		);
 
@@ -1255,23 +1246,6 @@ async function waitForReady(
 		await sleep(1000);
 	}
 	throw new Error(`container ${containerId} did not become ready in ${timeoutMs}ms`);
-}
-
-async function waitForJob(
-	containerId: string,
-	jobId: string,
-	timeoutMs = 60_000,
-): Promise<Record<string, unknown>> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		const job = await client.platform.getContainerJob(containerId, jobId, true);
-		const status = String(job.status ?? "");
-		if (["completed", "failed", "timeout", "timed_out"].includes(status)) {
-			return job;
-		}
-		await sleep(500);
-	}
-	throw new Error(`job ${jobId} did not finish in ${timeoutMs}ms`);
 }
 
 async function waitForEnvironment(

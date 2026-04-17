@@ -6,7 +6,7 @@ Welcome to the Quilt beta program. This repository provides early access to Quil
 
 Quilt has two primary CLI surfaces that together make up the platform guide:
 
-- `quilt.sh` for direct runtime operations on containers, snapshots, volumes, network state, exec jobs, GPU-backed container create, GUI access, and related runtime APIs
+- `quilt.sh` for direct runtime operations on containers, snapshots, volumes, network state, synchronous container exec, GPU-backed container create, GUI access, and related runtime APIs
 - `quiltc` for clusters, nodes, workloads, placements, reconciliation, join tokens, and Kubernetes-style manifest workflows
 
 This README covers both.
@@ -83,7 +83,7 @@ Typical `quilt.sh` flows:
 `quilt.sh` mental model:
 
 - container = primary runtime unit
-- exec job = command launched inside a container
+- container exec = command launched inside a container and returned inline on completion
 - operation = async lifecycle action such as create, stop, resume, delete, fork, or clone
 - snapshot = durable captured state for clone and lineage workflows
 - volume = persistent filesystem data outside a single container

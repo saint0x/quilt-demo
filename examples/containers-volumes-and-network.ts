@@ -118,18 +118,16 @@ async function main(): Promise<void> {
 			`keys=${Object.keys(envAfterReplace.environment).join(",")}`,
 		]);
 
-		const execAccepted = (await client.containers.exec(containerId, {
+		const execResult = (await client.containers.exec(containerId, {
 			command: ["sh", "-lc", "echo http-verify-ok"],
 			workdir: "/",
 			timeout_ms: 10_000,
-		})) as { job_id: string };
-		const execJob = await waitForJob(client, containerId, execAccepted.job_id);
-		assert(String(execJob.status) === "completed", "exec job did not complete");
+		})) as { exit_code?: number; stdout?: string };
+		assert(Number(execResult.exit_code ?? -1) === 0, "exec did not complete");
 		assert(
-			String(execJob.stdout ?? "").includes("http-verify-ok"),
+			String(execResult.stdout ?? "").includes("http-verify-ok"),
 			"exec stdout mismatch",
 		);
-			const jobs = await client.platform.listContainerJobs(containerId);
 			const processes = (await client.raw(
 				"get",
 				`/api/containers/${containerId}/processes`,
@@ -137,14 +135,12 @@ async function main(): Promise<void> {
 				processes: Array<Record<string, unknown>>;
 			};
 			const snapshotHeaders = { "X-Tenant-Id": tenantId };
-		assert(Array.isArray(jobs.jobs) && jobs.jobs.length > 0, "job list empty");
 		assert(
 			Array.isArray(processes.processes) && processes.processes.length > 0,
 			"process list empty",
 		);
-		push("exec/jobs", true, [
-			`job_id=${execAccepted.job_id}`,
-			`stdout=${String(execJob.stdout ?? "").trim()}`,
+		push("exec", true, [
+			`stdout=${String(execResult.stdout ?? "").trim()}`,
 			`processes=${processes.processes.length}`,
 		]);
 
@@ -310,14 +306,9 @@ async function main(): Promise<void> {
 		const archivedExec = (await client.containers.exec(containerId, {
 			command: ["cat", "/tmp/uploaded.txt"],
 			timeout_ms: 10_000,
-		})) as { job_id: string };
-		const archivedJob = await waitForJob(
-			client,
-			containerId,
-			archivedExec.job_id,
-		);
+		})) as { stdout?: string };
 		assert(
-			String(archivedJob.stdout ?? "").trim() === "into-container",
+			String(archivedExec.stdout ?? "").trim() === "into-container",
 			"container archive content mismatch",
 		);
 		push("container archive", true, [
@@ -536,24 +527,6 @@ async function waitForOperation(
 		timeoutMs,
 		intervalMs: 250,
 	});
-}
-
-async function waitForJob(
-	client: QuiltClient,
-	containerId: string,
-	jobId: string,
-	timeoutMs = 60_000,
-): Promise<Record<string, unknown>> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		const job = await client.platform.getContainerJob(containerId, jobId, true);
-		const status = String(job.status ?? "");
-		if (["completed", "failed", "timed_out"].includes(status)) {
-			return job;
-		}
-		await sleep(250);
-	}
-	throw new Error(`job ${jobId} did not complete within ${timeoutMs}ms`);
 }
 
 async function readFirstSseEvent(

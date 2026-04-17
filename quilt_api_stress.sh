@@ -183,36 +183,6 @@ poll_ready() {
   return 1
 }
 
-poll_job() {
-  local container_id="$1"
-  local job_id="$2"
-  local attempts="${3:-45}"
-  local i meta status
-  if [[ -z "$container_id" || "$container_id" == "null" || -z "$job_id" || "$job_id" == "null" ]]; then
-    record_result "fail" "job" "missing-job-or-container-id" "n/a" "attempted to poll empty job or container id"
-    return 1
-  fi
-  for ((i=0; i<attempts; i++)); do
-    meta="$(api GET "/api/containers/$container_id/jobs/$job_id?include_output=true")"
-    status="$(extract_json "$meta" '.status // empty')"
-    case "$status" in
-      completed)
-        record_result "pass" "job" "$job_id" "$(jq -r '.http_code' <<< "$meta")" "$(cat "$(jq -r '.body_file' <<< "$meta")")"
-        echo "$meta"
-        return 0
-        ;;
-      failed|timeout)
-        record_result "fail" "job" "$job_id" "$(jq -r '.http_code' <<< "$meta")" "$(cat "$(jq -r '.body_file' <<< "$meta")")"
-        echo "$meta"
-        return 1
-        ;;
-    esac
-    sleep 1
-  done
-  record_result "fail" "job" "$job_id" "timeout" "job did not complete"
-  return 1
-}
-
 cleanup() {
   log "cleanup starting"
   local id meta operation_id
@@ -288,7 +258,7 @@ test_volume_and_container_flow() {
   local container2="${PREFIX}-ctr2"
   local batch0="${PREFIX}-batch-0"
   local batch1="${PREFIX}-batch-1"
-  local meta operation_id container_id clone_id fork_id snap_id job_id session_id
+  local meta operation_id container_id clone_id fork_id snap_id session_id
 
   meta="$(api POST /api/volumes "$(jq -nc --arg name "$volume" '{name:$name,driver:"local",labels:{suite:"agents-doc",run:"stress"}}')")"
   require_http "POST /api/volumes" "$meta" '^201$|^200$'
@@ -339,10 +309,7 @@ test_volume_and_container_flow() {
   assert_http "PUT /api/containers/$container_id/env" "$(api PUT "/api/containers/$container_id/env" '{"environment":{"REPLACED":"1"}}')" '^200$'
 
   meta="$(api POST "/api/containers/$container_id/exec" '{"command":["/bin/sh","-lc","echo exec-ok && ls -la /workspace"],"workdir":"/workspace","timeout_ms":30000}')"
-  require_http "POST /api/containers/$container_id/exec" "$meta" '^200$|^202$'
-  job_id="$(extract_json "$meta" '.job_id')"
-  poll_job "$container_id" "$job_id" >/dev/null
-  assert_http "GET /api/containers/$container_id/jobs" "$(api GET "/api/containers/$container_id/jobs")" '^200$'
+  require_http "POST /api/containers/$container_id/exec" "$meta" '^200$'
   assert_http "GET /api/containers/$container_id/processes" "$(api GET "/api/containers/$container_id/processes")" '^200$'
 
   meta="$(api POST "/api/containers/$container_id/archive" "$archive_payload")"

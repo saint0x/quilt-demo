@@ -69,23 +69,17 @@ async function main(): Promise<void> {
 		);
 		lines.push("platform env patch/replace ok");
 
-		const execAccepted = (await client.containers.exec(containerId, {
+		const execResult = (await client.containers.exec(containerId, {
 			command: ["sh", "-lc", "echo sdk-exec-ok"],
 			workdir: "/",
 			timeout_ms: 10_000,
-		})) as { job_id: string };
-		const execJob = await waitForJob(client, containerId, execAccepted.job_id);
-		assert(String(execJob.status) === "completed", "SDK exec did not complete");
+		})) as { exit_code?: number; stdout?: string };
+		assert(Number(execResult.exit_code ?? -1) === 0, "SDK exec did not complete");
 		assert(
-			String(execJob.stdout ?? "").includes("sdk-exec-ok"),
+			String(execResult.stdout ?? "").includes("sdk-exec-ok"),
 			"SDK exec stdout mismatch",
 		);
-		const jobs = await client.platform.listContainerJobs(containerId);
-		assert(
-			Array.isArray(jobs.jobs) && jobs.jobs.length > 0,
-			"SDK job list empty",
-		);
-		lines.push(`containers.exec ok job=${execAccepted.job_id}`);
+		lines.push("containers.exec ok");
 
 		const volumeName = suffix("sdk-vol");
 		await client.volumes.create({
@@ -253,24 +247,6 @@ function suffix(prefix: string): string {
 
 async function sleep(ms: number): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForJob(
-	client: QuiltClient,
-	containerId: string,
-	jobId: string,
-	timeoutMs = 60_000,
-): Promise<Record<string, unknown>> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		const job = await client.platform.getContainerJob(containerId, jobId, true);
-		const status = String(job.status ?? "");
-		if (["completed", "failed", "timed_out"].includes(status)) {
-			return job;
-		}
-		await sleep(250);
-	}
-	throw new Error(`SDK job ${jobId} did not complete within ${timeoutMs}ms`);
 }
 
 async function createPublicContainer(

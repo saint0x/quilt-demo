@@ -9,7 +9,7 @@ The files here are not throwaway smoke scripts. Each example is meant to exercis
 Use these examples when you need to:
 
 - create or inspect containers programmatically
-- run exec jobs and follow async operations
+- run synchronous exec and follow async lifecycle operations
 - manage volumes, archives, and network state
 - drive clusters, nodes, workloads, and Kubernetes compatibility flows
 - use terminal attach and ICC messaging
@@ -147,7 +147,7 @@ It covers:
 - client construction
 - container lifecycle and readiness
 - env mutation
-- exec jobs
+- synchronous exec
 - volume file operations
 - function create, deploy, invoke, version, and pool reads
 - authenticated `client.raw(...)`

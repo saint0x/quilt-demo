@@ -9,7 +9,7 @@ Use this guide when working with:
 - containers
 - OCI image pulls and builds
 - elasticity
-- exec jobs
+- container exec
 - snapshots and forks
 - volumes and file transfer
 - network state and diagnostics
@@ -76,7 +76,7 @@ OCI image management is covered by the `oci` concern, including authenticated `G
 Think in terms of stable resources:
 
 - containers are the primary runtime unit
-- exec jobs are commands launched inside a container
+- container exec runs a command inside a container and returns the completed result inline
 - operations represent async lifecycle work
 - snapshots capture container state for cloning and lineage
 - container fork creates a writable branch from a live container
@@ -90,7 +90,7 @@ A typical troubleshooting flow is:
 2. resolve the target container or function
 3. inspect readiness and current state
 4. act
-5. inspect the resulting operation, exec job, or invocation record
+5. inspect the resulting operation, exec result, or invocation record
 
 ## Containers
 
@@ -428,35 +428,27 @@ Important semantics:
 - `/stream` is the live non-PTY output surface and returns `application/x-ndjson`, one JSON frame per line
 - `stdout` and `stderr` stream frames carry base64-encoded bytes in `data_b64`
 
-Exec accepted response:
+Exec response:
 
 ```json
 {
-  "success": true,
   "container_id": "ctr_123",
-  "job_id": "job_123",
-  "status": "running",
-  "status_url": "/api/containers/ctr_123/jobs/job_123"
+  "exit_code": 0,
+  "stdout": "hello\n",
+  "stderr": "",
+  "execution_time_ms": 12,
+  "timed_out": false
 }
 ```
 
-Exec job inspection routes:
+Process inspection routes:
 
 ```text
-GET    /api/containers/<container_id>/jobs
-GET    /api/containers/<container_id>/jobs/<job_id>?include_output=true
 GET    /api/containers/<container_id>/processes
 DELETE /api/containers/<container_id>/processes/<pid>?signal=<signal>
 ```
 
-Observed job statuses:
-
-- `running`
-- `completed`
-- `failed`
-- `timeout`
-
-Agent rule: exec is always job-driven. Submit the command, then inspect the job record for completion and output.
+Agent rule: exec is synchronous. Submit the command, then inspect `stdout`, `stderr`, `exit_code`, and `execution_time_ms` from the returned body.
 
 Live stream request shape:
 
@@ -832,7 +824,7 @@ Important semantics:
 - the WebSocket path can attach an existing session or create a fresh one when `session_id` is omitted and `container_id` is provided
 - terminal sessions are tenant-scoped and capped per tenant
 
-Agent rule: use terminal sessions for interactive shell behavior, `/stream` for live non-PTY output consumption, and exec jobs for submit-and-track execution.
+Agent rule: use terminal sessions for interactive shell behavior, `/stream` for live non-PTY output consumption, and `/exec` for synchronous command execution.
 
 ## GUI Access
 

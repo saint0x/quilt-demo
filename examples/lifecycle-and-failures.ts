@@ -87,15 +87,14 @@ async function main(): Promise<void> {
 		);
 		lines.push(`resume ok state=${String(resumed.state ?? "")}`);
 
-		const pidJobAccepted = (await client.containers.exec(containerId, {
+		const pidExec = (await client.containers.exec(containerId, {
 			command: ["sh", "-lc", "sleep 60 >/dev/null 2>&1 & echo $!"],
 			timeout_ms: 10_000,
-		})) as { job_id: string };
-		const pidJob = await waitForJob(client, containerId, pidJobAccepted.job_id);
-		const pid = String(pidJob.stdout ?? "").match(/(\d+)\s*$/)?.[1] ?? "";
+		})) as { stdout?: string };
+		const pid = String(pidExec.stdout ?? "").match(/(\d+)\s*$/)?.[1] ?? "";
 		assert(
 			/^\d+$/.test(pid),
-			`failed to parse background pid from stdout: ${String(pidJob.stdout ?? "")}`,
+			`failed to parse background pid from stdout: ${String(pidExec.stdout ?? "")}`,
 		);
 		await client.raw("delete", "/api/containers/{id}/processes/{pid}", {
 			pathParams: { id: containerId, pid },
@@ -363,24 +362,6 @@ async function waitForOperation(
 		timeoutMs,
 		intervalMs: 250,
 	});
-}
-
-async function waitForJob(
-	client: QuiltClient,
-	containerId: string,
-	jobId: string,
-	timeoutMs = 60_000,
-): Promise<Record<string, unknown>> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		const job = await client.platform.getContainerJob(containerId, jobId, true);
-		const status = String(job.status ?? "");
-		if (["completed", "failed", "timed_out"].includes(status)) {
-			return job;
-		}
-		await sleep(250);
-	}
-	throw new Error(`job ${jobId} did not complete within ${timeoutMs}ms`);
 }
 
 async function waitForContainerState(

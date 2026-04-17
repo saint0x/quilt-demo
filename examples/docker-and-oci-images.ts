@@ -109,23 +109,17 @@ async function main(): Promise<void> {
 			`container create ok operation=${operationId} id=${containerId}`,
 		);
 
-		const execAccepted = (await client.containers.exec(containerId, {
+		const execResult = (await client.containers.exec(containerId, {
 			command: ["sh", "-lc", "echo oci-image-ok"],
 			workdir: "/",
 			timeout_ms: 30_000,
-		})) as { job_id?: string };
-		const jobId = String(execAccepted.job_id ?? "");
-		assert(jobId, "OCI exec job_id missing");
-		const execJob = await waitForJob(client, containerId, jobId);
+		})) as { exit_code?: number; stdout?: string };
+		assert(Number(execResult.exit_code ?? -1) === 0, "OCI exec did not complete");
 		assert(
-			String(execJob.status ?? "") === "completed",
-			"OCI exec did not complete",
-		);
-		assert(
-			String(execJob.stdout ?? "").includes("oci-image-ok"),
+			String(execResult.stdout ?? "").includes("oci-image-ok"),
 			"OCI exec stdout mismatch",
 		);
-		lines.push(`container exec ok job=${jobId}`);
+		lines.push("container exec ok");
 	} finally {
 		await cleanup.run();
 	}
@@ -178,28 +172,6 @@ function suffix(prefix: string): string {
 
 async function sleep(ms: number): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForJob(
-	client: QuiltClient,
-	containerId: string,
-	jobId: string,
-	timeoutMs = 60_000,
-): Promise<Record<string, unknown>> {
-	const startedAt = Date.now();
-	while (Date.now() - startedAt < timeoutMs) {
-		const job = await client.platform.getContainerJob(containerId, jobId, true);
-		const status = String(job.status ?? "");
-		if (
-			status === "completed" ||
-			status === "failed" ||
-			status === "timed_out"
-		) {
-			return job;
-		}
-		await sleep(500);
-	}
-	throw new Error(`Timed out waiting for job ${jobId}`);
 }
 
 async function deletePublicContainer(
