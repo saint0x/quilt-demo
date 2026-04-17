@@ -118,11 +118,16 @@ DELETE /api/containers/<container_id>
 
 Important semantics:
 
-- `create`, `batch create`, `start`, `stop`, `resume`, `fork`, and delete are operation-driven and return `202`
+- `create` returns `201` with the ready container payload after the container has been created and started
+- `stop`, `kill`, `rename`, and `delete` are direct mutations, not operation handles
+- `stop` returns `200` after graceful shutdown and exited-state bookkeeping complete
+- `kill` returns `200` after force kill and exited-state bookkeeping complete
+- `delete` returns `200` after the container has been removed
+- `batch create`, `start`, `resume`, and `fork` are operation-driven and return `202`
 - `POST /api/containers/<container_id>/snapshot` is also operation-driven and returns `202 {success, operation_id, status_url}`
-- `kill` and `rename` are direct mutations, not operation handles
 - `GET /api/containers/<container_id>` returns the runtime status object, not a full create-time spec; it does not include image, command, environment, or volume attachments
 - `GET /api/containers/by-name/<name>` is a resolver that returns only `container_id`
+- direct lifecycle routes reject deprecated `async_mode` as unsupported input
 - readiness should be checked explicitly; do not assume a created, started, resumed, or forked container is ready yet
 - `exec_ready` means the container is running, its `minit` control socket is responsive, and the managed image contract validates
 - `network_ready` reports network allocation separately from exec readiness
@@ -477,7 +482,7 @@ Live stream example frames:
 
 ## Operations
 
-Async lifecycle routes typically return an accepted payload containing an operation handle.
+Operation-driven lifecycle routes return an accepted payload containing an operation handle.
 
 Operation lookup:
 
