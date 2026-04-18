@@ -422,7 +422,7 @@ Exec request shape:
 Important semantics:
 
 - `command` is argv-only and must be a JSON array of strings
-- exec is submit-and-track; the route returns a job handle immediately
+- exec is synchronous; the route returns the completed result inline
 - shell behavior is explicit, not implied: if shell parsing is required, invoke `["/bin/sh", "-lc", "..."]` or another interpreter directly
 - the container must be running and `minit` must be healthy, or exec is rejected
 - `/stream` is the live non-PTY output surface and returns `application/x-ndjson`, one JSON frame per line
