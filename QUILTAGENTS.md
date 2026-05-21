@@ -7,6 +7,7 @@ This file is the standalone agent guide for the Quilt platform. Treat it as the 
 Use this guide when working with:
 
 - containers
+- published services and internet ingress
 - OCI image pulls and builds
 - elasticity
 - container exec
@@ -76,6 +77,7 @@ OCI image management is covered by the `oci` concern, including authenticated `G
 Think in terms of stable resources:
 
 - containers are the primary runtime unit
+- published services expose one container port to the public internet through Quilt-managed ingress
 - container exec runs a command inside a container and returns the completed result inline
 - operations represent async lifecycle work
 - snapshots capture container state for cloning and lineage
@@ -825,6 +827,85 @@ Important semantics:
 - terminal sessions are tenant-scoped and capped per tenant
 
 Agent rule: use terminal sessions for interactive shell behavior, `/stream` for live non-PTY output consumption, and `/exec` for synchronous command execution.
+
+## Published Services
+
+Published services are the one-shot "expose my server to the internet" surface for HTTP and WebSocket workloads.
+
+Primary routes:
+
+```text
+POST   /api/containers/<container_id>/services
+GET    /api/containers/<container_id>/services
+GET    /api/services/<service_id>
+DELETE /api/services/<service_id>
+GET    /linx/<service_id>/...
+POST   /linx/<service_id>/...
+PUT    /linx/<service_id>/...
+PATCH  /linx/<service_id>/...
+DELETE /linx/<service_id>/...
+HEAD   /linx/<service_id>/...
+OPTIONS /linx/<service_id>/...
+```
+
+Create payload:
+
+```json
+{
+  "name": "amp",
+  "target_port": 7001,
+  "protocol": "http",
+  "enable_websockets": true,
+  "auth_mode": "service_token",
+  "ttl_secs": 3600
+}
+```
+
+Important semantics:
+
+- this is a persisted tenant-scoped resource, not a transient convenience redirect
+- create returns `201` and persists a published service record immediately
+- `protocol` currently supports only `http`
+- `enable_websockets` defaults to `true`
+- `auth_mode` supports `service_token` and `public`
+- `service_token` mode returns signed access URLs with a `linx_token` query parameter that Quilt validates at the ingress layer
+- `public` mode skips Quilt token checks at the ingress layer
+- `ttl_secs` is optional; without it, the service stays published until explicit delete or container removal
+- published services require container networking to be enabled; non-networked containers are rejected before create
+- public ingress is served under `/linx/<service_id>/...`, and Quilt proxies the current sync-backed container IP plus `target_port`
+- WebSocket upgrades on the same Linx prefix are forwarded only when `enable_websockets=true`
+- ingress requests are read-only against service state; they do not reconcile ownership or mutate readiness
+- ingress returns `503` when the target container is not running, not network-ready, missing an IP, or not accepting connections
+
+Response shape:
+
+```json
+{
+  "service_id": "lnx_123",
+  "container_id": "abc",
+  "name": "amp",
+  "target_port": 7001,
+  "protocol": "http",
+  "enable_websockets": true,
+  "auth_mode": "service_token",
+  "public_url": "https://backend.example.test/linx/lnx_123/?linx_token=...",
+  "websocket_url": "wss://backend.example.test/linx/lnx_123/?linx_token=...",
+  "status": "pending",
+  "created_at": 1774626769,
+  "updated_at": 1774626769,
+  "expires_at": 1774630369
+}
+```
+
+Status values:
+
+- `pending`
+- `ready`
+- `target_unreachable`
+- `expired`
+- `error`
+
+Agent rule: use published services when the goal is "make this containerized HTTP or WebSocket server reachable from the public internet" without building a separate ingress stack.
 
 ## GUI Access
 
