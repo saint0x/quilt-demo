@@ -251,36 +251,30 @@ async function main(): Promise<void> {
 			content: Buffer.from("hello-volume", "utf8").toString("base64"),
 			mode: 0o644,
 		});
-		const file = await client.platform.getVolumeFile(volumeName, "hello.txt");
+		const file = await downloadVolumeFile(volumeName, "hello.txt");
 		assert(
-			Buffer.from(file.content, "base64").toString("utf8") === "hello-volume",
+			file.toString("utf8") === "hello-volume",
 			"volume file mismatch",
 		);
 		const ls = (await client.volumes.listFiles(volumeName)) as {
 			files: Array<Record<string, unknown>>;
 		};
-		const archiveContent = await createTarGzBase64([
+		const archiveContent = await createTarGzBytes([
 			{ path: "nested/archive.txt", content: "from-archive" },
 		]);
-		const volumeArchiveAccepted = (await client.platform.uploadVolumeArchive(
-			volumeName,
-			{
-				content: archiveContent,
-				strip_components: 0,
-				path: "/",
-			},
+		const volumeArchiveAccepted = (await uploadArchive(
+			`/api/volumes/${encodeURIComponent(volumeName)}/archive`,
+			archiveContent,
+			"/",
+			0,
 		)) as { operation_id?: string };
 		const volumeArchiveOp = await waitForOperation(
 			client,
 			String(volumeArchiveAccepted.operation_id),
 		);
-		const archived = await client.platform.getVolumeFile(
-			volumeName,
-			"nested/archive.txt",
-		);
+		const archived = await downloadVolumeFile(volumeName, "nested/archive.txt");
 		assert(
-			Buffer.from(archived.content, "base64").toString("utf8") ===
-				"from-archive",
+			archived.toString("utf8") === "from-archive",
 			"archive upload mismatch",
 		);
 		await client.platform.deleteVolumeFile(volumeName, "hello.txt");
@@ -291,14 +285,14 @@ async function main(): Promise<void> {
 			`archive_status=${String(volumeArchiveOp.status)}`,
 		]);
 
-		const containerArchiveAccepted =
-			(await client.platform.uploadContainerArchive(containerId, {
-				content: await createTarGzBase64([
-					{ path: "uploaded.txt", content: "into-container" },
-				]),
-				strip_components: 0,
-				path: "/tmp",
-			})) as { operation_id?: string };
+		const containerArchiveAccepted = (await uploadArchive(
+			`/api/containers/${encodeURIComponent(containerId)}/archive`,
+			await createTarGzBytes([
+				{ path: "uploaded.txt", content: "into-container" },
+			]),
+			"/tmp",
+			0,
+		)) as { operation_id?: string };
 		const containerArchiveOp = await waitForOperation(
 			client,
 			String(containerArchiveAccepted.operation_id),
@@ -662,9 +656,9 @@ async function deletePublicContainer(
 	}
 }
 
-async function createTarGzBase64(
+async function createTarGzBytes(
 	files: Array<{ path: string; content: string }>,
-): Promise<string> {
+): Promise<Buffer> {
 	const root = await mkdtemp(join(tmpdir(), "quilt-demo-archive-"));
 	try {
 		for (const file of files) {
@@ -684,11 +678,64 @@ async function createTarGzBase64(
 			root,
 			...files.map((file) => file.path),
 		]);
-		const data = await readFile(tarball);
-		return data.toString("base64");
+		return await readFile(tarball);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
+}
+
+async function downloadVolumeFile(
+	volumeName: string,
+	path: string,
+): Promise<Buffer> {
+	const response = await fetch(
+		`${BASE_URL}/api/volumes/${encodeURIComponent(volumeName)}/files/${encodePathSegment(path)}`,
+		{
+			headers: authHeaders(),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`volume file download failed: ${response.status} ${await response.text()}`,
+		);
+	}
+	return Buffer.from(await response.arrayBuffer());
+}
+
+async function uploadArchive(
+	pathname: string,
+	archiveBytes: Buffer,
+	targetPath: string,
+	stripComponents: number,
+): Promise<Record<string, unknown>> {
+	const url = new URL(`${BASE_URL}${pathname}`);
+	url.searchParams.set("path", targetPath);
+	url.searchParams.set("strip_components", String(stripComponents));
+	const response = await fetch(url, {
+		method: "POST",
+		headers: authHeaders({ "Content-Type": "application/gzip" }),
+		body: new Uint8Array(archiveBytes),
+	});
+	const bodyText = await response.text();
+	if (!response.ok) {
+		throw new Error(`archive upload failed: ${response.status} ${bodyText}`);
+	}
+	return JSON.parse(bodyText) as Record<string, unknown>;
+}
+
+function authHeaders(extra: Record<string, string> = {}): HeadersInit {
+	return {
+		...(API_KEY ? { "X-Api-Key": API_KEY } : JWT ? { Authorization: `Bearer ${JWT}` } : {}),
+		...extra,
+	};
+}
+
+function encodePathSegment(path: string): string {
+	return path
+		.split("/")
+		.filter((segment) => segment.length > 0)
+		.map((segment) => encodeURIComponent(segment))
+		.join("/");
 }
 
 async function mkdirRecursive(path: string): Promise<void> {

@@ -86,6 +86,32 @@ api() {
   rm -f "$code_file"
 }
 
+api_binary() {
+  local method="$1"
+  local path="$2"
+  local body_file_input="$3"
+  local extra_headers="${4-}"
+  local body_file code_file curl_exit
+  body_file="$(mktemp)"
+  code_file="$(mktemp)"
+  local -a cmd=(curl -sS -X "$method" -H "X-Api-Key: $QUILT_API_KEY")
+  if [[ -n "$extra_headers" ]]; then
+    while IFS= read -r header; do
+      [[ -z "$header" ]] && continue
+      cmd+=(-H "$header")
+    done <<< "$extra_headers"
+  fi
+  cmd+=(--data-binary "@$body_file_input" -o "$body_file" -w "%{http_code}" "$QUILT_BASE_URL$path")
+  if ! "${cmd[@]}" > "$code_file"; then
+    curl_exit=$?
+    printf '{"http_code":"000","body_file":"%s","curl_exit":"%s"}\n' "$body_file" "$curl_exit"
+    rm -f "$code_file"
+    return 0
+  fi
+  printf '{"http_code":"%s","body_file":"%s","curl_exit":"0"}\n' "$(cat "$code_file")" "$body_file"
+  rm -f "$code_file"
+}
+
 body_slurp() {
   local file="$1"
   jq -Rs . < "$file"
@@ -271,7 +297,7 @@ test_volume_and_container_flow() {
   local file_payload
   file_payload="$(printf 'stress-file-%s\n' "$RUN_ID" | base64 -w0 | jq -nc --arg content "$(cat)" '{path:"/hello.txt",content:$content,mode:644}')"
   assert_http "POST /api/volumes/$volume/files" "$(api POST "/api/volumes/$volume/files" "$file_payload")" '^200$|^201$'
-  assert_http "GET /api/volumes/$volume/files/hello.txt" "$(api GET "/api/volumes/$volume/files/hello.txt")" '^200$'
+  assert_http "GET /api/volumes/$volume/files/hello.txt" "$(api GET "/api/volumes/$volume/files/hello.txt" "" $'Accept: application/octet-stream')" '^200$'
 
   local tarball
   tarball="$(mktemp)"
@@ -279,9 +305,7 @@ test_volume_and_container_flow() {
   srcdir="$(mktemp -d)"
   printf 'archive-%s\n' "$RUN_ID" > "$srcdir/archive.txt"
   tar -C "$srcdir" -czf "$tarball" .
-  local archive_payload
-  archive_payload="$(jq -nc --arg content "$(base64 -w0 "$tarball")" '{content:$content,strip_components:0,path:"/archive"}')"
-  meta="$(api POST "/api/volumes/$volume/archive" "$archive_payload")"
+  meta="$(api_binary POST "/api/volumes/$volume/archive?path=/archive&strip_components=0" "$tarball" $'Content-Type: application/gzip')"
   assert_http "POST /api/volumes/$volume/archive" "$meta" '^202$'
   operation_id="$(extract_json "$meta" '.operation_id')"
   poll_operation "$operation_id" >/dev/null
@@ -312,7 +336,7 @@ test_volume_and_container_flow() {
   require_http "POST /api/containers/$container_id/exec" "$meta" '^200$'
   assert_http "GET /api/containers/$container_id/processes" "$(api GET "/api/containers/$container_id/processes")" '^200$'
 
-  meta="$(api POST "/api/containers/$container_id/archive" "$archive_payload")"
+  meta="$(api_binary POST "/api/containers/$container_id/archive?path=/archive&strip_components=0" "$tarball" $'Content-Type: application/gzip')"
   assert_http "POST /api/containers/$container_id/archive" "$meta" '^202$'
   operation_id="$(extract_json "$meta" '.operation_id')"
   poll_operation "$operation_id" >/dev/null

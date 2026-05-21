@@ -654,12 +654,9 @@ POST /api/volumes/<name>/archive
 
 Archive payload contract for both routes:
 
-```json
-{
-  "content": "<base64 tar.gz>",
-  "strip_components": 1,
-  "path": "/app"
-}
+```text
+Content-Type: application/gzip or application/x-tar
+Query: ?path=/app&strip_components=1
 ```
 
 Single-file volume write:
@@ -682,6 +679,8 @@ Notes:
 
 - archive uploads are operation-driven
 - single-file volume reads and writes are synchronous
+- single-file volume download returns raw bytes, not JSON-wrapped base64
+- volume `ls` supports `page` and `page_size` pagination parameters
 - `mode` is an octal permission value encoded as an integer such as `644` or `755`
 
 Agent rule: archive upload is the normal shape for syncing a codebase or bundle into a target filesystem.
@@ -697,6 +696,7 @@ GET    /api/volumes/<name>
 GET    /api/volumes/<name>/inspect
 GET    /api/volumes/<name>/ls
 GET    /api/volumes/<name>/ls?path=<path>
+GET    /api/volumes/<name>/ls?path=<path>&page=1&page_size=100
 GET    /api/volumes/<name>/files/<path>
 DELETE /api/volumes/<name>/files/<path>
 POST   /api/volumes/<name>/rename
@@ -727,6 +727,7 @@ Important semantics:
 
 - volume delete is operation-driven
 - file download and delete paths use the wildcard path segment after `/files/`
+- file download returns an `application/octet-stream` body with metadata in headers
 - volume list, inspect, ls, rename, and single-file operations are direct request-response routes
 
 Agent rule: choose volumes for persistent state that should survive container replacement.

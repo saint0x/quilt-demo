@@ -106,13 +106,9 @@ async function main(): Promise<void> {
 			content: Buffer.from("sdk-volume-ok", "utf8").toString("base64"),
 			mode: 0o644,
 		});
-		const volumeFile = await client.platform.getVolumeFile(
-			volumeName,
-			"sdk.txt",
-		);
+		const volumeFile = await downloadVolumeFile(volumeName, "sdk.txt");
 		assert(
-			Buffer.from(volumeFile.content, "base64").toString("utf8") ===
-				"sdk-volume-ok",
+			volumeFile.toString("utf8") === "sdk-volume-ok",
 			"SDK volume file mismatch",
 		);
 		const volumeInspect = await client.volumes.inspect(volumeName);
@@ -321,6 +317,39 @@ async function deletePublicContainer(
 		}
 		throw error;
 	}
+}
+
+async function downloadVolumeFile(
+	volumeName: string,
+	path: string,
+): Promise<Buffer> {
+	const response = await fetch(
+		`${BASE_URL}/api/volumes/${encodeURIComponent(volumeName)}/files/${encodePathSegment(path)}`,
+		{
+			headers: authHeaders(),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`volume file download failed: ${response.status} ${await response.text()}`,
+		);
+	}
+	return Buffer.from(await response.arrayBuffer());
+}
+
+function authHeaders(extra: Record<string, string> = {}): HeadersInit {
+	return {
+		...(API_KEY ? { "X-Api-Key": API_KEY } : JWT ? { Authorization: `Bearer ${JWT}` } : {}),
+		...extra,
+	};
+}
+
+function encodePathSegment(path: string): string {
+	return path
+		.split("/")
+		.filter((segment) => segment.length > 0)
+		.map((segment) => encodeURIComponent(segment))
+		.join("/");
 }
 
 main().catch((error) => {

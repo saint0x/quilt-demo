@@ -101,28 +101,29 @@ async function main(): Promise<void> {
 			content: Buffer.from("hello-volume", "utf8").toString("base64"),
 			mode: 0o644,
 		});
-		const hello = await client.platform.getVolumeFile(volumeName, "hello.txt");
+		const hello = await downloadVolumeFile(volumeName, "hello.txt");
 		assert(
-			Buffer.from(hello.content, "base64").toString("utf8") === "hello-volume",
+			hello.toString("utf8") === "hello-volume",
 			"volume single-file read/write mismatch",
 		);
 
-		const archive = await createTarGzBase64([
+		const archive = await createTarGzBytes([
 			{ path: "nested/from-archive.txt", content: "archive-ok" },
 		]);
-		const uploaded = await client.platform.uploadVolumeArchive(volumeName, {
-			content: archive,
-			strip_components: 0,
-			path: "/",
-		});
-		assert(uploaded.success === true, "volume archive upload did not succeed");
-
-		const archived = await client.platform.getVolumeFile(
-			volumeName,
-			"nested/from-archive.txt",
+		const uploaded = await uploadArchive(
+			`/api/volumes/${encodeURIComponent(volumeName)}/archive`,
+			archive,
+			"/",
+			0,
 		);
+		assert(uploaded.operation_id, "volume archive upload did not return operation");
+		await client.awaitOperation(String(uploaded.operation_id), {
+			timeoutMs: 120_000,
+		});
+
+		const archived = await downloadVolumeFile(volumeName, "nested/from-archive.txt");
 		assert(
-			Buffer.from(archived.content, "base64").toString("utf8") === "archive-ok",
+			archived.toString("utf8") === "archive-ok",
 			"volume archive extraction mismatch",
 		);
 
@@ -195,21 +196,19 @@ async function main(): Promise<void> {
 
 	await attempt("container-files-logs-metrics-network", async () => {
 		const target = containers[0];
-		const archive = await createTarGzBase64([
+		const archive = await createTarGzBytes([
 			{ path: "app/from-upload.txt", content: "container-archive-ok" },
 		]);
-		const uploaded = await client.platform.uploadContainerArchive(
-			target.containerId,
-			{
-				content: archive,
-				strip_components: 0,
-				path: "/",
-			},
+		const uploaded = await uploadArchive(
+			`/api/containers/${encodeURIComponent(target.containerId)}/archive`,
+			archive,
+			"/",
+			0,
 		);
-		assert(
-			uploaded.success === true,
-			"container archive upload did not report success",
-		);
+		assert(uploaded.operation_id, "container archive upload did not report operation");
+		await client.awaitOperation(String(uploaded.operation_id), {
+			timeoutMs: 120_000,
+		});
 
 		const verifyExec = (await client.containers.exec(target.containerId, {
 			command: ["sh", "-lc", "cat /app/from-upload.txt"],
@@ -1360,9 +1359,9 @@ class CleanupStack {
 const cleanup = new CleanupStack();
 const results: TestResult[] = [];
 
-async function createTarGzBase64(
+async function createTarGzBytes(
 	files: Array<{ path: string; content: string }>,
-): Promise<string> {
+): Promise<Buffer> {
 	const dir = await mkdtemp(join(tmpdir(), "quilt-stress-"));
 	try {
 		for (const file of files) {
@@ -1377,10 +1376,70 @@ async function createTarGzBase64(
 		await spawnCommand("tar", ["-czf", outPath, "-C", dir, "."]);
 		const encoded = await readFile(outPath);
 		await rm(outPath, { force: true });
-		return encoded.toString("base64");
+		return encoded;
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
+}
+
+async function createTarGzBase64(
+	files: Array<{ path: string; content: string }>,
+): Promise<string> {
+	return (await createTarGzBytes(files)).toString("base64");
+}
+
+async function downloadVolumeFile(
+	volumeName: string,
+	path: string,
+): Promise<Buffer> {
+	const response = await fetch(
+		`${BASE_URL}/api/volumes/${encodeURIComponent(volumeName)}/files/${encodePathSegment(path)}`,
+		{
+			headers: authHeaders(),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`volume file download failed: ${response.status} ${await response.text()}`,
+		);
+	}
+	return Buffer.from(await response.arrayBuffer());
+}
+
+async function uploadArchive(
+	pathname: string,
+	archiveBytes: Buffer,
+	targetPath: string,
+	stripComponents: number,
+): Promise<Record<string, unknown>> {
+	const url = new URL(`${BASE_URL}${pathname}`);
+	url.searchParams.set("path", targetPath);
+	url.searchParams.set("strip_components", String(stripComponents));
+	const response = await fetch(url, {
+		method: "POST",
+		headers: authHeaders({ "Content-Type": "application/gzip" }),
+		body: new Uint8Array(archiveBytes),
+	});
+	const bodyText = await response.text();
+	if (!response.ok) {
+		throw new Error(`archive upload failed: ${response.status} ${bodyText}`);
+	}
+	return JSON.parse(bodyText) as Record<string, unknown>;
+}
+
+function authHeaders(extra: Record<string, string> = {}): HeadersInit {
+	return {
+		...(API_KEY ? { "X-Api-Key": API_KEY } : JWT ? { Authorization: `Bearer ${JWT}` } : {}),
+		...extra,
+	};
+}
+
+function encodePathSegment(path: string): string {
+	return path
+		.split("/")
+		.filter((segment) => segment.length > 0)
+		.map((segment) => encodeURIComponent(segment))
+		.join("/");
 }
 
 async function spawnCommand(cmd: string, args: string[]): Promise<void> {
