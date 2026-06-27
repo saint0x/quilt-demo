@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "name": "quilt-host-smoke",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": [
+        "-lc",
+        "unset QUILT_API_KEY QUILT_TOKEN; ../quilt/quilt.sh list >/dev/null 2>/dev/null"
+      ],
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": [
+        "-lc",
+        "unset QUILT_API_KEY QUILT_TOKEN; ../quilt/quilt.sh list >/dev/null 2>/dev/null"
+      ],
+      "expect_exit": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": [
+        "-lc",
+        "set -a; source .env; set +a; ../quilt/quilt.sh health >/dev/null"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": [
+        "-lc",
+        "set -a; source .env; set +a; ../quilt/quilt.sh health >/dev/null"
+      ],
+      "expect_exit": 0
+    },
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": [
+        "-lc",
+        "set -a; source .env; set +a; ../quilt/quilt.sh list >/dev/null"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": [
+        "-lc",
+        "set -a; source .env; set +a; ../quilt/quilt.sh list >/dev/null"
+      ],
+      "expect_exit": 0
+    },
+    {
+      "type": "proc_when",
+      "cmd": "bash",
+      "args": [
+        "-lc",
+        "set -a; source .env; set +a; ../quilt/quilt.sh ready aa48720d-6f0f-4c1d-8bd7-34ae3475a847 >/dev/null"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "bash",
+      "args": [
+        "-lc",
+        "set -a; source .env; set +a; ../quilt/quilt.sh ready aa48720d-6f0f-4c1d-8bd7-34ae3475a847 >/dev/null"
+      ],
+      "expect_exit": 0
+    }
+  ]
+}
