@@ -293,6 +293,26 @@ Important semantics:
 - cluster node list and node detail responses expose that persisted inventory as `gpu_inventory`
 - scheduler placement must satisfy GPU inventory before assigning a workload
 
+Dedicated qgpu connection routes:
+
+```text
+GET    /api/qgpu/releases/latest
+GET    /api/qgpu/releases/<version>/<artifact_name>
+POST   /api/qgpu/connect/init
+POST   /api/qgpu/connect/complete
+GET    /api/qgpu/connections/current
+DELETE /api/qgpu/connections/current
+```
+
+qgpu flow semantics:
+
+- qgpu is the dedicated device-side binary for local GPU discovery, attestation, and trusted runtime preparation
+- `POST /api/qgpu/connect/init` returns the signed qgpu release contract the client must satisfy
+- `POST /api/qgpu/connect/complete` requires attestation fields `qgpu_version`, `qgpu_sha256`, `nonce`, `os`, `arch`, and `detect`
+- `detect` reports `qgpu_version`, runtime compatibility, and discovered GPU devices
+- `GET /api/qgpu/connections/current` returns the authenticated user's active qgpu-backed node binding and inventory
+- `DELETE /api/qgpu/connections/current` removes that active binding
+
 ## Elasticity
 
 Elasticity covers policy-driven resource changes and orchestrator-safe control actions for containers, functions, and workload placement.

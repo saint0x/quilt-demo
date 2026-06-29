@@ -1,6 +1,6 @@
-# Quilt Beta
+# Quilt Demo
 
-Welcome to the Quilt beta program. This repository provides early access to Quilt's container management capabilities for testing and development purposes.
+This repository is the runnable demo and reference workspace for the Quilt platform. It collects example flows for the runtime surface, control-plane surface, and the official SDK.
 
 ## About
 
@@ -8,6 +8,8 @@ Quilt has two primary CLI surfaces that together make up the platform guide:
 
 - `quilt.sh` for direct runtime operations on containers, snapshots, volumes, network state, synchronous container exec, GPU-backed container create, GUI access, and related runtime APIs
 - `quiltc` for clusters, nodes, workloads, placements, reconciliation, join tokens, and Kubernetes-style manifest workflows
+
+It also uses the official `quilt-sdk` package for programmatic flows and end-to-end example coverage.
 
 This README covers both.
 
@@ -92,6 +94,7 @@ GPU note:
 
 - GPU create is first-class through `--gpu-count` and repeatable `--gpu-id`
 - raw `/dev/nvidia*` host mounts are intentionally not the interface
+- local device-side GPU connectivity now uses the dedicated `qgpu` flow rather than ad hoc host setup
 
 ## `quiltc` Overview
 
@@ -231,6 +234,13 @@ Add your Quilt API key to your `.env` file:
 QUILT_API_KEY="quilt_sk_..."
 ```
 
+Common optional inputs:
+
+```bash
+QUILT_BASE_URL="https://backend.quilt.sh"
+QUILT_JWT="<token>"
+```
+
 ## Quick Start
 
 ```bash
@@ -272,7 +282,3 @@ Use `quiltc` for:
 - Kubernetes manifest validate, apply, diff, status, export, and resource operations
 
 Both are part of the same Quilt platform story. `quilt.sh` is the runtime-focused surface. `quiltc` is the orchestration-focused surface.
-
----
-
-**Important Notice:** This is purely experimental software in beta form. Use this cautiously as features may change, and stability is not guaranteed. Please report any issues or feedback to the development team.
