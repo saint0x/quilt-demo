@@ -1,17 +1,14 @@
 # Quilt Demo
 
-This repository is the runnable demo and reference workspace for the Quilt platform. It collects example flows for the runtime surface, control-plane surface, and the official SDK.
+This repository is the runnable demo and reference workspace for the Quilt platform. It is organized around the live HTTP API contract, the platform agent guide, and the official SDK.
 
-## About
+## Primary References
 
-Quilt has two primary CLI surfaces that together make up the platform guide:
+- [`QUILTAGENTS.md`](./QUILTAGENTS.md) is the main API-first operating guide. It documents the real platform resources, route semantics, request shapes, and workflow expectations using direct HTTP concepts.
+- [`examples/`](./examples) contains runnable TypeScript examples built on the official `quilt-sdk`.
+- `quiltc` remains the control-plane CLI for clusters, nodes, workloads, placements, join tokens, and Kubernetes-style workflows.
 
-- `quilt.sh` for direct runtime operations on containers, snapshots, volumes, network state, synchronous container exec, GPU-backed container create, GUI access, and related runtime APIs
-- `quiltc` for clusters, nodes, workloads, placements, reconciliation, join tokens, and Kubernetes-style manifest workflows
-
-It also uses the official `quilt-sdk` package for programmatic flows and end-to-end example coverage.
-
-This README covers both.
+This repo should not describe or depend on the old `quilt.sh` wrapper model.
 
 ## Runnable Examples
 
@@ -36,249 +33,42 @@ npm run example:lifecycle
 npm run examples:all
 ```
 
-## `quilt.sh` Overview
+## Environment
 
-`quilt.sh` is the direct runtime shell client for the Quilt platform. Use it when you need hands-on control of runtime resources and want a thin wrapper over the runtime API contract.
-
-Typical `quilt.sh` flows:
-
-```bash
-# Health and discovery
-./quilt.sh health
-./quilt.sh system
-./quilt.sh list
-./quilt.sh get <container_id>
-./quilt.sh get-by-name <container_name>
-
-# Container lifecycle
-./quilt.sh create demo
-./quilt.sh create demo --image prod-gui
-./quilt.sh create gpu-demo --gpu-count=1 --gpu-id=nvidia0 -- nvidia-smi
-./quilt.sh start <container_id>
-./quilt.sh ready <container_id>
-./quilt.sh stop <container_id>
-./quilt.sh resume <container_id>
-./quilt.sh rm <container_id>
-
-# Exec, logs, metrics
-./quilt.sh exec <container_id> "pwd"
-./quilt.sh exec <container_id> --workdir=/app "npm test"
-./quilt.sh logs <container_id> 100
-./quilt.sh metrics <container_id>
-
-# Files, volumes, and snapshots
-./quilt.sh sync <container_id> ./local-dir /app
-./quilt.sh volume-create demo-data
-./quilt.sh volume-put demo-data ./local.txt /remote.txt
-./quilt.sh snapshot <container_id>
-./quilt.sh snapshots
-./quilt.sh clone <snapshot_id> demo-clone
-
-# Runtime diagnostics
-./quilt.sh network
-./quilt.sh network-diag <container_id>
-./quilt.sh activity 50
-./quilt.sh op-status <operation_id>
-./quilt.sh op-wait <operation_id> --timeout-ms=300000
-```
-
-`quilt.sh` mental model:
-
-- container = primary runtime unit
-- container exec = command launched inside a container and returned inline on completion
-- operation = async lifecycle action such as create, stop, resume, delete, fork, or clone
-- snapshot = durable captured state for clone and lineage workflows
-- volume = persistent filesystem data outside a single container
-
-GPU note:
-
-- GPU create is first-class through `--gpu-count` and repeatable `--gpu-id`
-- raw `/dev/nvidia*` host mounts are intentionally not the interface
-- local device-side GPU connectivity now uses the dedicated `qgpu` flow rather than ad hoc host setup
-
-## `quiltc` Overview
-
-`quiltc` is Quilt's Kubernetes-like CLI. It talks to the Quilt backend over HTTP and manages both:
-
-- control-plane resources such as clusters, nodes, workloads, placements, and join tokens
-- runtime resources such as containers, snapshots, volumes, operations, and events
-
-GitHub: [ariacomputecompany/quiltc](https://github.com/ariacomputecompany/quiltc)
-
-Default auth and config inputs:
-
-- `QUILT_BASE_URL`
-- `QUILT_API_KEY`
-- `QUILT_JWT`
-- `QUILT_JOIN_TOKEN` for agent registration
-
-Typical usage patterns:
-
-```bash
-# Cluster lifecycle
-quiltc clusters create --name demo --pod-cidr 10.70.0.0/16 --node-cidr-prefix 24
-quiltc clusters list
-quiltc clusters get <cluster_id>
-
-# Join tokens and node enrollment
-quiltc clusters join-token-create <cluster_id> --ttl-secs 600 --max-uses 1
-quiltc agent register <cluster_id> --join-token <join_token> --name node-a
-quiltc agent heartbeat <cluster_id> <node_id> --state ready
-
-# Desired-state workloads
-quiltc clusters workload-create <cluster_id> '{"name":"demo","replicas":3,"command":["sh","-lc","echo hi; tail -f /dev/null"],"memory_limit_mb":128}'
-quiltc clusters workload-create <cluster_id> '{"name":"gpu-demo","replicas":1,"command":["sh","-lc","nvidia-smi && tail -f /dev/null"],"gpu_count":1}'
-quiltc clusters reconcile <cluster_id>
-quiltc clusters placements <cluster_id>
-
-# Runtime operations through quiltc
-quiltc containers create '{"name":"demo","image":"alpine:3.20"}'
-quiltc containers exec <container_id> -- sh -lc 'id && ip route'
-quiltc containers logs <container_id>
-quiltc operations get <operation_id>
-quiltc operations watch <operation_id> --timeout-secs 300
-
-# Kubernetes-style manifest workflows
-quiltc k8s validate -f ./manifests --namespace default
-quiltc k8s apply -f ./manifests --cluster-id <cluster_id> --follow
-quiltc k8s diff -f ./manifests --cluster-id <cluster_id>
-quiltc k8s export --cluster-id <cluster_id> -o yaml
-```
-
-`quiltc` mental model:
-
-- cluster ~= control plane
-- node ~= kubelet-managed machine
-- workload + replicas ~= deployment/replicaset-style desired state
-- placement ~= scheduled replica on a node
-- runtime container operations still map to the same underlying runtime surface
-
-## CLI Commands
-
-### System & Health
-
-| Command | Description |
-|---------|-------------|
-| `./quilt.sh health` | Check API health status (no authentication required) |
-| `./quilt.sh system` | Get system information |
-
-### Container Management
-
-| Command | Description |
-|---------|-------------|
-| `./quilt.sh list [state]` | List all containers (optional filter: running, stopped, exited) |
-| `./quilt.sh get <id>` | Get detailed information about a specific container |
-| `./quilt.sh create <name> [cmd]` | Create one container (operation-driven) |
-| `./quilt.sh create-batch --file <batch.json>` | Batch create via `POST /api/containers/batch` |
-| `./quilt.sh start <id>` | Start container |
-| `./quilt.sh stop <id>` | Stop container (operation-driven) |
-| `./quilt.sh rm <id>` | Delete container (operation-driven) |
-| `./quilt.sh resume <id>` | Resume container (operation-driven) |
-| `./quilt.sh fork <id> [name]` | Fork container (operation-driven) |
-| `./quilt.sh clone <snapshot_id> [name]` | Clone snapshot (operation-driven) |
-
-### Container Operations
-
-| Command | Description |
-|---------|-------------|
-| `./quilt.sh exec <id> <command>` | Execute a command in a running container |
-| `./quilt.sh logs <id> [lines]` | Retrieve container logs (default: 100 lines) |
-| `./quilt.sh metrics <id>` | Get real-time container metrics (CPU, memory, etc.) |
-| `./quilt.sh shell <id> [--cols=<n>] [--rows=<n>] [--shell=<abs-path>]` | Open interactive terminal (create + attach) |
-
-### Additional Features
-
-| Command | Description |
-|---------|-------------|
-| `./quilt.sh volumes` | List all volumes |
-| `./quilt.sh network` | Get network allocations |
-| `./quilt.sh monitors` | Get monitoring processes |
-| `./quilt.sh activity [limit]` | Get activity feed (default: 50 entries) |
-| `./quilt.sh op-status <operation_id>` | Get status for any operation |
-| `./quilt.sh op-wait <operation_id> [--interval-ms=1000] [--timeout-ms=300000]` | Poll until terminal operation state |
-
-## Operation Model
-
-- create, batch create, stop, delete, fork, clone, and resume are operation-driven
-- the accepted response returns HTTP `202` with:
-
-```json
-{ "success": true, "operation_id": "...", "status_url": "/api/operations/..." }
-```
-
-- start is immediate, but readiness still needs to be checked explicitly
-- use `./quilt.sh op-status` or `./quilt.sh op-wait` to observe terminal completion
-
-## Batch File Format
-
-`create-batch` expects either:
-- a JSON object with an `items` array, or
-- a raw JSON array of create-item objects.
-
-Example:
-
-```json
-{
-  "items": [
-    { "name": "web-1" },
-    { "name": "web-2", "command": ["/bin/sh", "-c", "echo ready"] }
-  ]
-}
-```
-
-## Environment Setup
-
-Add your Quilt API key to your `.env` file:
-
-```bash
-QUILT_API_KEY="quilt_sk_..."
-```
-
-Common optional inputs:
+Common local inputs:
 
 ```bash
 QUILT_BASE_URL="https://backend.quilt.sh"
+QUILT_API_KEY="quilt_sk_..."
 QUILT_JWT="<token>"
 ```
 
-## Quick Start
+Most examples rely on `QUILT_BASE_URL` plus either `QUILT_API_KEY` or `QUILT_JWT`.
 
-```bash
-# Check API health
-./quilt.sh health
+## How To Use This Repo
 
-# List all containers
-./quilt.sh list
+Use [`QUILTAGENTS.md`](./QUILTAGENTS.md) when you need:
 
-# Get container details
-./quilt.sh get abc123
+- direct HTTP route behavior
+- request and response contract details
+- container, volume, snapshot, terminal, ICC, cluster, workload, function, and GPU semantics
+- qgpu connection routes and attestation behavior
 
-# Execute a command
-./quilt.sh exec abc123 "ls -la /app"
+Use the examples when you need:
 
-# View logs
-./quilt.sh logs abc123 50
-```
+- production-shaped SDK calls
+- runnable end-to-end flows
+- reference code for tenant-authenticated platform usage
 
-## Platform Surfaces
+Use `quiltc` when you need:
 
-The Quilt platform includes both direct runtime operations and control-plane orchestration.
+- cluster lifecycle operations
+- node registration and heartbeat flows
+- workload reconciliation and placement inspection
+- Kubernetes-style manifest validation, diff, apply, and export
 
-Use `quilt.sh` for:
+## Platform Notes
 
-- container lifecycle, exec, logs, metrics, and shell access
-- snapshots, forks, clones, and operation tracking
-- volume creation and file movement
-- per-container network diagnostics and runtime inspection
-- GUI URL access and ICC-related runtime APIs
-
-Use `quiltc` for:
-
-- cluster lifecycle
-- node registration, heartbeat, drain, and deletion
-- workload specs with replicas
-- placements and reconciliation
-- join tokens and agent reporting
-- Kubernetes manifest validate, apply, diff, status, export, and resource operations
-
-Both are part of the same Quilt platform story. `quilt.sh` is the runtime-focused surface. `quiltc` is the orchestration-focused surface.
+- GPU-backed execution is first-class through `gpu_count` and `gpu_ids`; raw `/dev/nvidia*` host mounts are not the interface.
+- Local device-side GPU connectivity uses the dedicated `qgpu` flow documented in [`QUILTAGENTS.md`](./QUILTAGENTS.md).
+- The examples are expected to track the live backend and current `quilt-sdk` contract rather than preserving old wrapper behavior.
