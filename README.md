@@ -4,8 +4,11 @@ This repository is the runnable demo and reference workspace for the Quilt platf
 
 ## Primary References
 
+- Site: [`quilt.sh`](https://quilt.sh)
 - [`QUILTAGENTS.md`](./QUILTAGENTS.md) is the main API-first operating guide. It documents the real platform resources, route semantics, request shapes, and workflow expectations using direct HTTP concepts.
 - [`examples/`](./examples) contains runnable TypeScript examples built on the official `quilt-sdk`.
+- GitHub: [`ariacomputecompany/quiltc`](https://github.com/ariacomputecompany/quiltc)
+- GitHub: [`ariacomputecompany/quilt-core`](https://github.com/ariacomputecompany/quilt-core)
 - `quiltc` remains the control-plane CLI for clusters, nodes, workloads, placements, join tokens, and Kubernetes-style workflows.
 
 This repo should not describe or depend on the old `quilt.sh` wrapper model.
